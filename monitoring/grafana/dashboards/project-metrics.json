@@ -9,78 +9,209 @@
     {
       "type": "stat",
       "title": "Total Projects",
-      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
-      "targets": [{ "expr": "active_projects_total", "refId": "A" }],
-      "options": { "graphMode": "none", "textMode": "auto", "colorMode": "value" }
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "active_projects_total",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "graphMode": "none",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
     },
     {
       "type": "stat",
-      "title": "Projects Created This Week",
-      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
-      "targets": [{ "expr": "increase(projects_created_total[7d])", "refId": "A" }],
-      "options": { "graphMode": "none", "textMode": "auto", "colorMode": "value" }
+      "title": "Active Projects",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "active_projects_total",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "graphMode": "none",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
     },
     {
       "type": "stat",
       "title": "Total Tasks",
-      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
-      "targets": [{ "expr": "tasks_created_total", "refId": "A" }],
-      "options": { "graphMode": "none", "textMode": "auto", "colorMode": "value" }
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "tasks_created_total",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "graphMode": "none",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
     },
     {
       "type": "stat",
       "title": "Deployments Created",
-      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
-      "targets": [{ "expr": "deployments_created_total", "refId": "A" }],
-      "options": { "graphMode": "none", "textMode": "auto", "colorMode": "value" }
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "deployments_created_total",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "graphMode": "none",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
     },
     {
       "type": "timeseries",
       "title": "Project Growth Over Time",
-      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
-      "targets": [{ "expr": "active_projects_total", "legendFormat": "Active Projects", "refId": "A" }],
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "active_projects_total",
+          "legendFormat": "Active Projects",
+          "refId": "A"
+        }
+      ],
       "fieldConfig": {
-        "defaults": { "custom": { "lineWidth": 2 } },
+        "defaults": {
+          "custom": {
+            "lineWidth": 2
+          }
+        },
         "overrides": []
       }
     },
     {
       "type": "timeseries",
-      "title": "Task Creation Rate",
-      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
-      "targets": [{ "expr": "increase(tasks_created_total[5m])", "legendFormat": "Tasks per 5m", "refId": "A" }],
+      "title": "Total Tasks Created",
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "tasks_created_total",
+          "legendFormat": "Tasks per 5m",
+          "refId": "A"
+        }
+      ],
       "fieldConfig": {
-        "defaults": { "custom": { "lineWidth": 2 } },
+        "defaults": {
+          "custom": {
+            "lineWidth": 2
+          }
+        },
         "overrides": []
       }
     },
     {
       "type": "timeseries",
-      "title": "Deployment Frequency",
-      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
-      "targets": [{ "expr": "increase(deployments_created_total[1h])", "legendFormat": "Deployments per hour", "refId": "A" }],
+      "title": "Total Deployments",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "deployments_created_total",
+          "legendFormat": "Deployments per hour",
+          "refId": "A"
+        }
+      ],
       "fieldConfig": {
-        "defaults": { "custom": { "lineWidth": 2 } },
+        "defaults": {
+          "custom": {
+            "lineWidth": 2
+          }
+        },
         "overrides": []
       }
     },
     {
       "type": "timeseries",
       "title": "Incidents Over Time",
-      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
-      "targets": [{ "expr": "incidents_created_total", "legendFormat": "Total Incidents", "refId": "A" }],
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "incidents_created_total",
+          "legendFormat": "Total Incidents",
+          "refId": "A"
+        }
+      ],
       "fieldConfig": {
-        "defaults": { "custom": { "lineWidth": 2 } },
+        "defaults": {
+          "custom": {
+            "lineWidth": 2
+          }
+        },
         "overrides": []
       }
     },
     {
       "type": "timeseries",
       "title": "API Request Rate",
-      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 8 },
-      "targets": [{ "expr": "rate(http_requests_total[5m])", "legendFormat": "{{method}} {{route}} {{status}}", "refId": "A" }],
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "rate(http_requests_total[5m])",
+          "legendFormat": "{{method}} {{route}} {{status}}",
+          "refId": "A"
+        }
+      ],
       "fieldConfig": {
-        "defaults": { "custom": { "lineWidth": 1 } },
+        "defaults": {
+          "custom": {
+            "lineWidth": 1
+          }
+        },
         "overrides": []
       }
     }

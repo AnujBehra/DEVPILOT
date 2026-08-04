@@ -1,9 +1,9 @@
 import { analyzeIncidents, calculateDoraMetrics, readStore } from './store';
 
-export const generateChatResponse = (prompt: string) => {
-  const store = readStore();
-  const dora = calculateDoraMetrics();
-  const analysis = analyzeIncidents();
+export const generateChatResponse = async (prompt: string) => {
+  const store = await readStore();
+  const dora = await calculateDoraMetrics();
+  const analysis = await analyzeIncidents();
   const openTasks = store.tasks.filter((task) => task.status !== 'DONE');
   const riskyDeployments = store.deployments.filter((deployment) =>
     ['Running', 'Failed', 'Rolled Back'].includes(deployment.status),

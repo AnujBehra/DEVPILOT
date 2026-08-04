@@ -1,10 +1,11 @@
 import type { Request, Response, NextFunction } from 'express';
 
-export type Role = 'admin' | 'manager' | 'viewer';
+export type Role = 'owner' | 'admin' | 'manager' | 'member' | 'viewer' | 'system';
 
 export const getRole = (req: Request): Role => {
+  if (req.authUser?.role) return req.authUser.role;
   const role = (req.header('x-role') || 'viewer').toLowerCase();
-  if (role === 'admin' || role === 'manager') return role;
+  if (role === 'system') return role;
   return 'viewer';
 };
 

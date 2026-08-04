@@ -1,8 +1,16 @@
 import { apiClient } from './client';
+import type { AuthUser } from '../pages/Login';
+
+export type AuthResponse = {
+  user: AuthUser;
+  token: string;
+};
 
 export const authApi = {
-  list: () => apiClient.get('/auth'),
-  get: (id: string) => apiClient.get('/auth/' + id),
-  create: (payload: Record<string, unknown>) => apiClient.post('/auth', payload),
-  update: (id: string, payload: Record<string, unknown>) => apiClient.put('/auth/' + id, payload),
+  register: (payload: { name: string; email: string; password: string }) =>
+    apiClient.post<AuthResponse>('/api/auth/register', payload),
+  login: (payload: { email: string; password: string }) =>
+    apiClient.post<AuthResponse>('/api/auth/login', payload),
+  me: () => apiClient.get<{ user: AuthUser }>('/api/auth/me'),
+  acceptInvite: (token: string) => apiClient.post<{ invite: unknown }>(`/api/invites/${token}/accept`, {}),
 };

@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import { json } from 'body-parser';
 import cors from 'cors';
@@ -7,7 +8,7 @@ import rateLimit from 'express-rate-limit';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { createRealtimeServer } from './realtime';
 import { requireRole, getRole } from './rbac';
-import { recordActivity, listActivity } from './activity';
+import { listActivity, queryActivity, recordActivity } from './activity';
 import { searchRecords } from './search';
 import { upload } from './uploads';
 import { bump } from './analytics';
@@ -18,8 +19,12 @@ import {
     createProject,
     createTask,
     databaseInfo,
+    DEFAULT_WORKSPACE_ID,
+    DEFAULT_WORKSPACE_NAME,
     deleteProject,
     deleteTask,
+    ensurePublicProjectCatalog,
+    ensurePublicSeedData,
     findProjectByDeploymentWebhookToken,
     listIncidents,
     listIncidentsAsync,
@@ -37,34 +42,108 @@ import {
 } from './store';
 import type { Deployment } from './store';
 import type { Project, ProjectHealthCheck } from './store';
-import { observeDeploymentCreated, observeIncidentCreated, observeProjectCreated, observeTaskCreated, prometheusMiddleware, renderMetrics, requestHealthSummary } from './metrics';
-import { pushMetricsToGrafanaCloud } from './grafanaCloud';
+import { metricsContentType, observeDeploymentCreated, observeIncidentCreated, observeProjectCreated, observeProjectHealthCheck, observeTaskCreated, prometheusMiddleware, renderMetrics, requestHealthSummary } from './metrics';
+import { grafanaCloudStatus, provisionGrafanaCloudDashboards, pushMetricsToGrafanaCloud } from './grafanaCloud';
+import { fetchGitHubRepositoryMetrics } from './github';
+import { apiConfig, startupWarnings } from './config';
+import { authMiddleware, listAuthUsers, loginUser, registerUser, requireAuth } from './auth';
+import {
+    createAlertIntegration,
+    createAlertRule,
+    createWorkspaceInvite,
+    createBackup,
+    createClientReport,
+    createComment,
+    createIncidentAssistantInsight,
+    createProjectInvite,
+    createPostmortem,
+    createReleaseApproval,
+    createSprint,
+    deleteProjectFeatureData,
+    evaluateAlertRules,
+    featureSnapshot,
+    listProjectInvites,
+    acceptWorkspaceInvite,
+    acceptProjectInvite,
+    recordAudit,
+    testAlertIntegration,
+    updateReleaseApproval,
+    updateSprint,
+    updateTenantProfile,
+    upsertOnCall,
+    upsertSlo,
+    upsertStatusPage,
+    upsertCodeMetrics,
+    upsertProjectEnvironment,
+} from './productFeatures';
 
 export const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = apiConfig.port;
 const server = http.createServer(app);
 const realtime = createRealtimeServer(server);
 const isServerless = process.env.VERCEL === '1';
 
-const requesterEmail = (req: express.Request) => String(req.header('x-user-email') || '').trim().toLowerCase();
-const requesterName = (req: express.Request) => String(req.header('x-user') || '').trim();
+const requesterEmail = (req: express.Request) => String(req.authUser?.email || '').trim().toLowerCase();
+const requesterName = (req: express.Request) => String(req.authUser?.name || '').trim();
+const requesterWorkspaceId = (req: express.Request) => String(req.authUser?.workspaceId || DEFAULT_WORKSPACE_ID);
 const projectMembership = (project: Project, email: string) => {
     const normalizedEmail = String(email || '').trim().toLowerCase();
     if (!normalizedEmail) return undefined;
-    return (project.members || []).find((member) => String(member.email || '').trim().toLowerCase() === normalizedEmail)
-        || ((project.ownerEmail || '').trim().toLowerCase() === normalizedEmail
-            ? { email: normalizedEmail, name: project.owner, role: 'owner' as const }
-            : undefined);
+    if ((project.ownerEmail || '').trim().toLowerCase() === normalizedEmail) {
+        return { email: normalizedEmail, name: project.owner, role: 'owner' as const };
+    }
+    return (project.members || []).find((member) => String(member.email || '').trim().toLowerCase() === normalizedEmail);
 };
-const projectAccessibleBy = (project: Project, email: string) => Boolean(projectMembership(project, email));
-const canManageProject = (project: Project, email: string) => {
+const hasWorkspaceProjectAccess = (role: string) => ['owner', 'admin'].includes(String(role || '').toLowerCase());
+const projectInWorkspace = (project: Project, workspaceId: string) => !project.workspaceId || project.workspaceId === workspaceId;
+const projectAccessibleBy = (project: Project, email: string, workspaceRole = '', workspaceId = DEFAULT_WORKSPACE_ID) =>
+    projectInWorkspace(project, workspaceId) && (hasWorkspaceProjectAccess(workspaceRole) || Boolean(projectMembership(project, email)));
+const canManageProject = (project: Project, email: string, workspaceRole = '') => {
+    if (['owner', 'admin'].includes(String(workspaceRole || '').toLowerCase())) return true;
     const role = projectMembership(project, email)?.role;
     return role === 'owner' || role === 'admin';
 };
-const canDeleteProject = (project: Project, email: string) => projectMembership(project, email)?.role === 'owner';
-const canEditProjectContent = (project: Project, email: string) => {
+const canDeleteProject = (project: Project, email: string, workspaceRole = '') => {
+    if (['owner', 'admin'].includes(String(workspaceRole || '').toLowerCase())) return true;
+    const role = projectMembership(project, email)?.role;
+    return role === 'owner' || role === 'admin';
+};
+const canEditProjectContent = (project: Project, email: string, workspaceRole = '') => {
+    if (['owner', 'admin'].includes(String(workspaceRole || '').toLowerCase())) return true;
     const role = projectMembership(project, email)?.role;
     return role === 'owner' || role === 'admin' || role === 'member';
+};
+const workspaceTeamMembers = async (workspaceId: string, requester?: { email: string; name: string; role: string; workspaceId?: string }) => {
+    const members = new Map<string, { email: string; name: string; role: 'admin' | 'member' | 'viewer' }>();
+    (await listAuthUsers()).forEach((user) => {
+        if ((user.workspaceId || DEFAULT_WORKSPACE_ID) !== workspaceId) return;
+        const email = String(user.email || '').trim().toLowerCase();
+        if (!email) return;
+        const role = user.role === 'owner' || user.role === 'admin' ? 'admin' : user.role === 'viewer' ? 'viewer' : 'member';
+        members.set(email, { email, name: user.name || email, role });
+    });
+    if (requester?.email) {
+        const email = requester.email.trim().toLowerCase();
+        const role = requester.role === 'owner' || requester.role === 'admin' ? 'admin' : requester.role === 'viewer' ? 'viewer' : 'member';
+        members.set(email, { email, name: requester.name || email, role });
+    }
+    return Array.from(members.values());
+};
+const mergeWorkspaceMembers = (members: unknown, requester: { email: string; name: string; role: string }) => {
+    const merged = new Map<string, { email: string; name: string; role: 'admin' | 'member' | 'viewer' }>();
+    const requesterEmail = requester.email.trim().toLowerCase();
+    if (Array.isArray(members)) {
+        members.forEach((candidate: any) => {
+            const email = String(candidate?.email || '').trim().toLowerCase();
+            if (!email) return;
+            const role = candidate?.role === 'admin' || candidate?.role === 'viewer' ? candidate.role : 'member';
+            merged.set(email, { email, name: String(candidate?.name || '').trim() || email, role });
+        });
+    }
+    if (requesterEmail) {
+        merged.set(requesterEmail, { email: requesterEmail, name: requester.name || requesterEmail, role: 'admin' });
+    }
+    return Array.from(merged.values());
 };
 const requireRequesterEmail = (req: express.Request, res: express.Response) => {
     const email = requesterEmail(req);
@@ -74,7 +153,29 @@ const requireRequesterEmail = (req: express.Request, res: express.Response) => {
     }
     return email;
 };
-const visibleProjects = (projects: Project[], email: string) => projects.filter((project) => projectAccessibleBy(project, email));
+const visibleProjects = (projects: Project[], email: string, workspaceRole = '', workspaceId = DEFAULT_WORKSPACE_ID) =>
+    projects.filter((project) => projectAccessibleBy(project, email, workspaceRole, workspaceId));
+
+const evaluateProjectAlertsFor = async (projectId: string, reason: string) => {
+    const store = await readStoreAsync();
+    const evaluations = await evaluateAlertRules({
+        projectId,
+        deployments: store.deployments.filter((deployment) => deployment.projectId === projectId),
+        incidents: store.incidents.filter((incident) => incident.projectId === projectId),
+        healthChecks: store.projectHealthChecks.filter((check) => check.projectId === projectId),
+    });
+    evaluations.filter((evaluation) => evaluation.matched).forEach((evaluation) => {
+        recordActivity({
+            actor: 'alert-engine',
+            role: 'system',
+            projectId,
+            eventType: 'alert_rule.matched',
+            action: `alert_rule.matched:${evaluation.ruleName}:${reason}`,
+        });
+        realtime.broadcast({ type: 'alert_rule.matched', payload: evaluation });
+    });
+    return evaluations;
+};
 
 const normalizeDeploymentStatus = (status: unknown): Deployment['status'] => {
     const value = String(status || '').trim().toLowerCase();
@@ -107,6 +208,9 @@ const deploymentProviderFromPlatform = (platform: string): Deployment['provider'
     if (value === 'render') return 'Render';
     return 'Other';
 };
+
+const webhookPlatformSlug = (platform: Project['deploymentPlatform']) =>
+    platform === 'GitHub Pages' ? 'github-pages' : String(platform || 'Other').toLowerCase();
 
 const normalizeDeploymentEnvironment = (environment: unknown): Deployment['environment'] =>
     String(environment || '').trim().toLowerCase() === 'production' ? 'production' : 'staging';
@@ -166,9 +270,10 @@ const recordProjectHealthForProject = async (project: Project) => {
         responseTimeMs: result.responseTimeMs,
         error: result.error,
     });
+    observeProjectHealthCheck(status);
 
     if (status === 'down') {
-        recordIncidentIfMissing({
+        await recordIncidentIfMissing({
             projectId: project.id,
             title: `Application health check failed: ${project.name}`,
             description: result.error || `${project.appUrl} returned HTTP ${result.statusCode}.`,
@@ -176,8 +281,24 @@ const recordProjectHealthForProject = async (project: Project) => {
             service: project.serviceName,
             actor: 'project-health-checker',
         });
+        recordActivity({
+            actor: 'project-health-checker',
+            role: 'system',
+            projectId: project.id,
+            eventType: 'health.failed',
+            action: `health.failed:${project.name}`,
+        });
+        realtime.broadcast({ type: 'project.health.failed', payload: check });
     }
 
+    await upsertProjectEnvironment({
+        projectId: project.id,
+        name: 'Production',
+        appUrl: project.appUrl,
+        healthStatus: status,
+        lastCheckedAt: check.checkedAt,
+    }).catch((error) => console.error('Environment sync failed', error));
+    await evaluateProjectAlertsFor(project.id, 'health-check').catch((error) => console.error('Alert evaluation failed', error));
     realtime.broadcast({ type: 'project.health.checked', payload: check });
     return check;
 };
@@ -192,6 +313,19 @@ const ensureRecentProjectHealthCheck = async (project: Project, checks: ProjectH
 const runProjectHealthChecks = async () => {
     const projects = (await listProjectsAsync()).filter((project) => project.status === 'Active' && project.appUrl);
     await Promise.all(projects.map(recordProjectHealthForProject));
+};
+
+const runProjectHealthChecksForProjects = async (projects: Project[], concurrency = 20) => {
+    const checks: ProjectHealthCheck[] = [];
+    const batchSize = Math.max(1, Math.min(25, Math.floor(concurrency) || 20));
+    for (let index = 0; index < projects.length; index += batchSize) {
+        const batch = projects.slice(index, index + batchSize);
+        const results = await Promise.allSettled(batch.map(recordProjectHealthForProject));
+        results.forEach((result) => {
+            if (result.status === 'fulfilled') checks.push(result.value);
+        });
+    }
+    return checks;
 };
 
 const syncGrafanaCloud = async (reason: string, options: { force?: boolean } = {}) => {
@@ -337,6 +471,7 @@ const deploymentFromGitHubEvent = (projectId: string, serviceName: string, githu
 
 const recordIncidentIfMissing = async (input: {
     projectId: string;
+    relatedDeploymentId?: string;
     title: string;
     description: string;
     severity: 'Low' | 'Medium' | 'High' | 'Critical';
@@ -353,6 +488,7 @@ const recordIncidentIfMissing = async (input: {
 
     const incident = await createIncident({
         projectId: input.projectId,
+        relatedDeploymentId: input.relatedDeploymentId || '',
         title: input.title,
         description: input.description,
         severity: input.severity,
@@ -364,6 +500,8 @@ const recordIncidentIfMissing = async (input: {
     recordActivity({
         actor: input.actor,
         role: 'system',
+        projectId: input.projectId,
+        eventType: 'incident.created',
         action: `incident.created:${incident.title}`,
     });
     realtime.broadcast({ type: 'incident.created', payload: incident });
@@ -379,26 +517,51 @@ const recordDeploymentFailureIncident = async (deployment: Deployment, actor: st
         severity: deployment.status === 'Failed' ? 'High' : 'Medium',
         service: deployment.service,
         actor,
+        relatedDeploymentId: deployment.id,
     });
+    realtime.broadcast({ type: 'deployment.failed', payload: deployment });
 };
 
 const limiter = rateLimit({
-    windowMs: 60 * 1000,
-    limit: 120,
+    windowMs: apiConfig.rateLimitWindowMs,
+    limit: apiConfig.rateLimitMax,
     standardHeaders: true,
     legacyHeaders: false,
 });
 
+const requestIdMiddleware: express.RequestHandler = (req, res, next) => {
+    const incoming = String(req.header('x-request-id') || '').trim();
+    const requestId = incoming || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    res.locals.requestId = requestId;
+    res.setHeader('x-request-id', requestId);
+    next();
+};
+
+const securityHeaders: express.RequestHandler = (_req, res, next) => {
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('referrer-policy', 'no-referrer');
+    res.setHeader('x-frame-options', 'DENY');
+    res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=()');
+    if (apiConfig.isProduction) {
+        res.setHeader('strict-transport-security', 'max-age=31536000; includeSubDomains');
+    }
+    next();
+};
+
 // Middleware
-app.set('trust proxy', 1);
-app.use(cors());
-app.use(json());
+app.set('trust proxy', apiConfig.trustProxy);
+app.use(requestIdMiddleware);
+app.use(securityHeaders);
+app.use(cors({ origin: apiConfig.corsOrigin, credentials: true }));
+app.use(json({ limit: apiConfig.jsonLimit }));
 app.use(limiter);
+app.use(authMiddleware);
 app.use(prometheusMiddleware);
 // TODO(gateway): introduce structured request logging with correlation IDs
 // TECH-DEBT(gateway): move proxy route configuration to config service
 
 app.use((req, _res, next) => {
+    ensurePublicSeedData();
     bump('requests');
     next();
 });
@@ -426,7 +589,7 @@ app.get('/api/dashboard', async (_req, res) => {
     const email = requireRequesterEmail(_req, res);
     if (!email) return;
     const store = await readStoreAsync();
-    const projects = visibleProjects(store.projects, email);
+    const projects = visibleProjects(store.projects, email, getRole(_req), requesterWorkspaceId(_req));
     const projectIds = new Set(projects.map((project) => project.id));
     const tasks = store.tasks.filter((task) => projectIds.has(task.projectId));
     const incidents = store.incidents.filter((incident) => projectIds.has(incident.projectId));
@@ -478,11 +641,224 @@ app.get('/api/database', (_req, res) => {
     res.json(databaseInfo());
 });
 
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const result = await registerUser({
+            name: String(req.body?.name || ''),
+            email: String(req.body?.email || ''),
+            password: String(req.body?.password || ''),
+        });
+        recordActivity({
+            actor: result.user.name,
+            role: result.user.role,
+            eventType: 'auth.registered',
+            action: `auth.registered:${result.user.email}`,
+        });
+        res.status(201).json(result);
+    } catch (error) {
+        res.status(400).json({ error: error instanceof Error ? error.message : 'Registration failed' });
+    }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const result = await loginUser({
+            email: String(req.body?.email || ''),
+            password: String(req.body?.password || ''),
+        });
+        recordActivity({
+            actor: result.user.name,
+            role: result.user.role,
+            eventType: 'auth.login',
+            action: `auth.login:${result.user.email}`,
+        });
+        res.json(result);
+    } catch (error) {
+        res.status(401).json({ error: error instanceof Error ? error.message : 'Login failed' });
+    }
+});
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+    res.json({ user: req.authUser });
+});
+
+app.get('/api/workspace/team', requireAuth, async (req, res) => {
+    const workspaceId = requesterWorkspaceId(req);
+    const features = await featureSnapshot();
+    res.json({
+        workspace: {
+            id: workspaceId,
+            name: DEFAULT_WORKSPACE_NAME,
+            mode: 'shared',
+            policy: 'One shared team workspace. Members can view shared projects; owners, admins, and project leads manage access and changes.',
+        },
+        members: await workspaceTeamMembers(workspaceId, req.authUser ? { email: req.authUser.email, name: req.authUser.name, role: req.authUser.role, workspaceId } : undefined),
+        invites: features.workspaceInvites.filter((invite) => invite.workspaceId === workspaceId),
+    });
+});
+
+app.post('/api/workspace/invites', requireRole(['owner', 'admin']), async (req, res) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+        res.status(400).json({ error: 'A valid teammate email is required' });
+        return;
+    }
+    const role = req.body?.role === 'admin' || req.body?.role === 'viewer' ? req.body.role : 'member';
+    const invite = await createWorkspaceInvite({
+        workspaceId: requesterWorkspaceId(req),
+        email,
+        role,
+        invitedBy: requesterName(req) || requesterEmail(req) || 'workspace-admin',
+    });
+    recordActivity({
+        actor: requesterName(req) || requesterEmail(req),
+        role: getRole(req),
+        eventType: 'workspace.invite.created',
+        action: `workspace.invite.created:${email}`,
+    });
+    realtime.broadcast({ type: 'workspace.invite.created', payload: invite });
+    res.status(201).json({ invite, inviteUrl: `/login?invite=${invite.token}&email=${encodeURIComponent(email)}` });
+});
+
+app.get('/api/launch-readiness', requireAuth, async (req, res) => {
+    const email = requireRequesterEmail(req, res);
+    if (!email) return;
+
+    const workspaceId = requesterWorkspaceId(req);
+    const store = await readStoreAsync();
+    const projects = visibleProjects(store.projects, email, getRole(req), workspaceId);
+    const projectIds = new Set(projects.map((project) => project.id));
+    const tasks = store.tasks.filter((task) => projectIds.has(task.projectId));
+    const deployments = store.deployments.filter((deployment) => projectIds.has(deployment.projectId));
+    const incidents = store.incidents.filter((incident) => projectIds.has(incident.projectId));
+    const healthChecks = store.projectHealthChecks.filter((check) => projectIds.has(check.projectId));
+    const features = await featureSnapshot();
+    const projectFeatureFilter = (item: { projectId: string }) => projectIds.has(item.projectId);
+    const database = databaseInfo();
+    const grafana = grafanaCloudStatus();
+
+    const checklist = [
+        {
+            id: 'workspace',
+            label: 'Shared workspace',
+            done: (await workspaceTeamMembers(workspaceId, req.authUser ? { email: req.authUser.email, name: req.authUser.name, role: req.authUser.role, workspaceId } : undefined)).length > 0,
+            detail: 'Team space has at least one authenticated member.',
+        },
+        {
+            id: 'projects',
+            label: 'Client projects',
+            done: projects.length > 0,
+            detail: `${projects.length} visible project${projects.length === 1 ? '' : 's'} in this workspace.`,
+        },
+        {
+            id: 'monitoring',
+            label: 'Project monitoring',
+            done: projects.some((project) => Boolean(project.appUrl)) && healthChecks.length > 0,
+            detail: `${healthChecks.length} health check${healthChecks.length === 1 ? '' : 's'} stored for visible projects.`,
+        },
+        {
+            id: 'deployments',
+            label: 'Deployment evidence',
+            done: deployments.length > 0,
+            detail: `${deployments.length} deployment record${deployments.length === 1 ? '' : 's'} captured.`,
+        },
+        {
+            id: 'incidents',
+            label: 'Incident workflow',
+            done: incidents.length > 0 || healthChecks.some((check) => check.status !== 'healthy'),
+            detail: `${incidents.length} incident record${incidents.length === 1 ? '' : 's'} available.`,
+        },
+        {
+            id: 'github',
+            label: 'Code metrics',
+            done: features.codeMetrics.some(projectFeatureFilter),
+            detail: `${features.codeMetrics.filter(projectFeatureFilter).length} code metric profile${features.codeMetrics.filter(projectFeatureFilter).length === 1 ? '' : 's'} connected.`,
+        },
+        {
+            id: 'alerts',
+            label: 'Alerting rules',
+            done: features.alertRules.some(projectFeatureFilter) || features.alertIntegrations.some(projectFeatureFilter),
+            detail: `${features.alertRules.filter(projectFeatureFilter).length} alert rule${features.alertRules.filter(projectFeatureFilter).length === 1 ? '' : 's'} and ${features.alertIntegrations.filter(projectFeatureFilter).length} channel${features.alertIntegrations.filter(projectFeatureFilter).length === 1 ? '' : 's'}.`,
+        },
+        {
+            id: 'reports',
+            label: 'Client reporting',
+            done: features.clientReports.some(projectFeatureFilter),
+            detail: `${features.clientReports.filter(projectFeatureFilter).length} client report${features.clientReports.filter(projectFeatureFilter).length === 1 ? '' : 's'} generated.`,
+        },
+        {
+            id: 'database',
+            label: 'Durable database',
+            done: database.engine === 'Postgres' && database.durable,
+            detail: `${database.engine} is configured as the production data layer.`,
+        },
+        {
+            id: 'grafana',
+            label: 'Grafana Cloud metrics',
+            done: grafana.configured && Boolean(grafana.lastPush?.pushed),
+            detail: grafana.lastPush?.timestamp ? `Last metrics push at ${grafana.lastPush.timestamp}.` : 'Grafana Cloud connection is configured.',
+        },
+    ];
+
+    const score = Math.round((checklist.filter((item) => item.done).length / checklist.length) * 100);
+    res.json({
+        score,
+        status: score >= 85 ? 'Launch Ready' : score >= 60 ? 'Almost Ready' : 'Needs Setup',
+        workspace: { id: workspaceId, name: DEFAULT_WORKSPACE_NAME },
+        metrics: {
+            projects: projects.length,
+            tasks: tasks.length,
+            deployments: deployments.length,
+            incidents: incidents.length,
+            healthChecks: healthChecks.length,
+            openIncidents: incidents.filter((incident) => incident.status !== 'Resolved').length,
+        },
+        checklist,
+        database,
+        grafana: {
+            configured: grafana.configured,
+            stackUrl: grafana.stackUrl,
+            lastPush: grafana.lastPush,
+        },
+        tenant: features.tenant,
+        generatedAt: new Date().toISOString(),
+    });
+});
+
+app.get('/api/backups', requireRole(['owner', 'admin']), async (_req, res) => {
+    res.json({ backups: (await featureSnapshot()).backups });
+});
+
+app.post('/api/backups', requireRole(['owner', 'admin']), async (req, res) => {
+    const store = await readStoreAsync();
+    const features = await featureSnapshot();
+    const backup = await createBackup({ store, features }, [
+        'projects',
+        'tasks',
+        'deployments',
+        'incidents',
+        'healthChecks',
+        'tenant',
+        'comments',
+        'sprints',
+        'codeMetrics',
+        'alertIntegrations',
+    ]);
+    recordActivity({
+        actor: req.header('x-user') || 'admin',
+        role: getRole(req),
+        eventType: 'backup.created',
+        action: `backup.created:${backup.fileName}`,
+    });
+    realtime.broadcast({ type: 'backup.created', payload: backup });
+    res.status(201).json({ backup });
+});
+
 app.get('/api/projects', async (_req, res) => {
     const email = requireRequesterEmail(_req, res);
     if (!email) return;
     const store = await readStoreAsync();
-    const projects = visibleProjects(store.projects, email).map((project) => ({
+    const projects = visibleProjects(store.projects, email, getRole(_req), requesterWorkspaceId(_req)).map((project) => ({
         ...project,
         taskCount: store.tasks.filter((task) => task.projectId === project.id).length,
         openTasks: store.tasks.filter((task) => task.projectId === project.id && task.status !== 'DONE').length,
@@ -494,11 +870,23 @@ app.get('/api/projects', async (_req, res) => {
 app.post('/api/projects', async (req, res) => {
     const email = requireRequesterEmail(req, res);
     if (!email) return;
-    const project = await createProject({ ...(req.body || {}), owner: req.body?.owner || requesterName(req) || 'Workspace Owner', ownerEmail: email });
+    if (getRole(req) === 'viewer') {
+        res.status(403).json({ error: 'Viewer role cannot create projects' });
+        return;
+    }
+    const project = await createProject({
+        ...(req.body || {}),
+        workspaceId: requesterWorkspaceId(req),
+        owner: req.body?.owner || requesterName(req) || 'Workspace Owner',
+        ownerEmail: email,
+        members: mergeWorkspaceMembers(req.body?.members, { email, name: requesterName(req) || email, role: getRole(req) }),
+    });
     observeProjectCreated();
     recordActivity({
         actor: requesterName(req) || 'product',
         role: getRole(req),
+        projectId: project.id,
+        eventType: 'project.created',
         action: `project.created:${project.name}`,
     });
     await syncGrafanaCloud('project.created');
@@ -510,7 +898,7 @@ app.patch('/api/projects/:id', async (req, res) => {
     const email = requireRequesterEmail(req, res);
     if (!email) return;
     const current = (await listProjectsAsync()).find((item) => item.id === req.params.id);
-    if (!current || !canManageProject(current, email)) {
+    if (!current || !canManageProject(current, email, getRole(req))) {
         res.status(404).json({ error: 'Project not found' });
         return;
     }
@@ -525,6 +913,8 @@ app.patch('/api/projects/:id', async (req, res) => {
     recordActivity({
         actor: req.header('x-user') || 'product',
         role: getRole(req),
+        projectId: project.id,
+        eventType: 'project.updated',
         action: `project.updated:${project.name}`,
     });
     await syncGrafanaCloud('project.updated');
@@ -536,15 +926,25 @@ app.delete('/api/projects/:id', async (req, res) => {
     const email = requireRequesterEmail(req, res);
     if (!email) return;
     const current = (await listProjectsAsync()).find((item) => item.id === req.params.id);
-    if (!current || !canDeleteProject(current, email)) {
+    if (!current || !canDeleteProject(current, email, getRole(req))) {
         res.status(404).json({ error: 'Project not found' });
         return;
     }
     const deleted = await deleteProject(req.params.id);
     if (!deleted) {
-        res.status(409).json({ error: 'Project still has tasks or does not exist' });
+        res.status(404).json({ error: 'Project not found' });
         return;
     }
+    await deleteProjectFeatureData(req.params.id);
+    recordActivity({
+        actor: requesterName(req) || email,
+        role: getRole(req),
+        projectId: req.params.id,
+        eventType: 'project.deleted',
+        action: `project.deleted:${current.name}`,
+    });
+    await syncGrafanaCloud('project.deleted');
+    realtime.broadcast({ type: 'project.deleted', payload: { id: req.params.id, name: current.name } });
     res.json({ ok: true });
 });
 
@@ -553,7 +953,7 @@ app.get('/api/projects/:projectId/tasks', async (req, res) => {
     if (!email) return;
     const store = await readStoreAsync();
     const project = store.projects.find((item) => item.id === req.params.projectId);
-    if (!project || !projectAccessibleBy(project, email)) {
+    if (!project || !projectAccessibleBy(project, email, getRole(req), requesterWorkspaceId(req))) {
         res.status(404).json({ error: 'Project not found' });
         return;
     }
@@ -566,7 +966,7 @@ app.get('/api/projects/:projectId/summary', async (req, res) => {
     if (!email) return;
     const store = await readStoreAsync();
     const project = store.projects.find((item) => item.id === req.params.projectId);
-    if (!project || !projectAccessibleBy(project, email)) {
+    if (!project || !projectAccessibleBy(project, email, getRole(req), requesterWorkspaceId(req))) {
         res.status(404).json({ error: 'Project not found' });
         return;
     }
@@ -583,11 +983,521 @@ app.get('/api/projects/:projectId/health-checks', async (req, res) => {
     const email = requireRequesterEmail(req, res);
     if (!email) return;
     const project = (await listProjectsAsync()).find((item) => item.id === req.params.projectId);
-    if (!project || !projectAccessibleBy(project, email)) {
+    if (!project || !projectAccessibleBy(project, email, getRole(req), requesterWorkspaceId(req))) {
         res.status(404).json({ error: 'Project not found' });
         return;
     }
     res.json({ healthChecks: (await listProjectHealthChecksAsync(req.params.projectId)).slice(0, 50) });
+});
+
+const loadAccessibleProject = async (req: express.Request, res: express.Response) => {
+    const email = requireRequesterEmail(req, res);
+    if (!email) return undefined;
+    const project = (await listProjectsAsync()).find((item) => item.id === req.params.projectId);
+    if (!project || !projectAccessibleBy(project, email, getRole(req), requesterWorkspaceId(req))) {
+        res.status(404).json({ error: 'Project not found' });
+        return undefined;
+    }
+    return { project, email };
+};
+
+app.get('/api/product/features', async (req, res) => {
+    const email = requireRequesterEmail(req, res);
+    if (!email) return;
+    const projectId = String(req.query.projectId || '');
+    if (projectId) {
+        const project = (await listProjectsAsync()).find((item) => item.id === projectId);
+        if (!project || !projectAccessibleBy(project, email, getRole(req), requesterWorkspaceId(req))) {
+            res.status(404).json({ error: 'Project not found' });
+            return;
+        }
+    }
+    res.json(await featureSnapshot(projectId));
+});
+
+app.get('/api/projects/:projectId/environments', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    const snapshot = await featureSnapshot(access.project.id);
+    const existing = snapshot.environments;
+    if (!existing.length) {
+        const baseWebhook = `${req.protocol}://${req.get('host')}/webhooks/deployments/${webhookPlatformSlug(access.project.deploymentPlatform)}/${access.project.deploymentWebhookToken}`;
+        const production = await upsertProjectEnvironment({
+            projectId: access.project.id,
+            name: 'Production',
+            appUrl: access.project.appUrl,
+            deploymentWebhookUrl: baseWebhook,
+            healthStatus: 'unknown',
+        });
+        res.json({ environments: [production] });
+        return;
+    }
+    res.json({ environments: existing });
+});
+
+app.post('/api/projects/:projectId/environments', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canManageProject(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project admin access required' });
+        return;
+    }
+    const name = String(req.body?.name || '').trim();
+    if (!name) {
+        res.status(400).json({ error: 'Environment name is required' });
+        return;
+    }
+    const environment = await upsertProjectEnvironment({
+        ...req.body,
+        projectId: access.project.id,
+        name,
+    });
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'environment.upserted', entity: environment.name });
+    recordActivity({ actor: requesterName(req) || access.email, role: getRole(req), projectId: access.project.id, eventType: 'environment.upserted', action: `environment.upserted:${environment.name}` });
+    realtime.broadcast({ type: 'environment.upserted', payload: environment });
+    res.status(201).json({ environment });
+});
+
+app.get(['/api/status/:slug', '/status/:slug'], async (req, res) => {
+    const slug = String(req.params.slug || '').trim().toLowerCase();
+    const snapshot = await featureSnapshot();
+    const statusPage = snapshot.statusPages.find((page) => page.publicSlug === slug);
+    if (!statusPage) {
+        res.status(404).json({ error: 'Status page not found' });
+        return;
+    }
+    const store = await readStoreAsync();
+    const project = store.projects.find((item) => item.id === statusPage.projectId);
+    const healthChecks = store.projectHealthChecks.filter((check) => check.projectId === statusPage.projectId).slice(0, 20);
+    const incidents = store.incidents.filter((incident) => incident.projectId === statusPage.projectId).slice(0, 10);
+    const uptime = healthChecks.length
+        ? Number(((healthChecks.filter((check) => check.status === 'healthy').length / healthChecks.length) * 100).toFixed(1))
+        : null;
+    res.json({
+        statusPage,
+        project: project ? { id: project.id, name: project.name, serviceName: project.serviceName, appUrl: project.appUrl } : null,
+        uptime,
+        currentHealth: healthChecks[0] || null,
+        incidents,
+        updatedAt: new Date().toISOString(),
+    });
+});
+
+app.put('/api/tenant', requireRole(['owner', 'admin']), async (req, res) => {
+    const tenant = await updateTenantProfile(req.body || {});
+    recordActivity({
+        actor: req.header('x-user') || 'admin',
+        role: getRole(req),
+        eventType: 'tenant.updated',
+        action: `tenant.updated:${tenant.name}`,
+    });
+    realtime.broadcast({ type: 'tenant.updated', payload: tenant });
+    res.json({ tenant });
+});
+
+app.get('/api/projects/:projectId/comments', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    res.json({ comments: (await featureSnapshot(access.project.id)).comments });
+});
+
+app.get('/api/projects/:projectId/invites', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canManageProject(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project admin access required' });
+        return;
+    }
+    res.json({ invites: await listProjectInvites(access.project.id) });
+});
+
+app.post('/api/projects/:projectId/invites', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canManageProject(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project admin access required' });
+        return;
+    }
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+        res.status(400).json({ error: 'A valid invite email is required' });
+        return;
+    }
+    const role = req.body?.role === 'admin' || req.body?.role === 'viewer' ? req.body.role : 'member';
+    const members = access.project.members.some((member) => member.email.toLowerCase() === email)
+        ? access.project.members
+        : [...access.project.members, { email, name: email, role }];
+    const project = await updateProject(access.project.id, { members });
+    const invite = await createProjectInvite({
+        projectId: access.project.id,
+        workspaceId: access.project.workspaceId || requesterWorkspaceId(req),
+        email,
+        role,
+        invitedBy: requesterName(req) || access.email,
+    });
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'project.invite.created', entity: email });
+    recordActivity({ actor: requesterName(req) || access.email, role: getRole(req), projectId: access.project.id, eventType: 'project.invite.created', action: `project.invite.created:${email}` });
+    realtime.broadcast({ type: 'project.invite.created', payload: { invite, project } });
+    res.status(201).json({ invite, project, inviteUrl: `/login?invite=${invite.token}&email=${encodeURIComponent(email)}` });
+});
+
+app.post('/api/invites/:token/accept', requireAuth, async (req, res) => {
+    const email = requireRequesterEmail(req, res);
+    if (!email) return;
+    const invite = await acceptProjectInvite(req.params.token, email);
+    if (invite) {
+        recordActivity({ actor: requesterName(req) || email, role: getRole(req), projectId: invite.projectId, eventType: 'project.invite.accepted', action: `project.invite.accepted:${email}` });
+        realtime.broadcast({ type: 'project.invite.accepted', payload: invite });
+        res.json({ invite, scope: 'project' });
+        return;
+    }
+
+    const workspaceInvite = await acceptWorkspaceInvite(req.params.token, email);
+    if (!workspaceInvite) {
+        res.status(404).json({ error: 'Invite not found or already used' });
+        return;
+    }
+    recordActivity({ actor: requesterName(req) || email, role: getRole(req), eventType: 'workspace.invite.accepted', action: `workspace.invite.accepted:${email}` });
+    realtime.broadcast({ type: 'workspace.invite.accepted', payload: workspaceInvite });
+    res.json({ invite: workspaceInvite, scope: 'workspace' });
+});
+
+app.post('/api/projects/:projectId/comments', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canEditProjectContent(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project access denied' });
+        return;
+    }
+    const body = String(req.body?.body || '').trim();
+    if (!body) {
+        res.status(400).json({ error: 'Comment body is required' });
+        return;
+    }
+    const comment = await createComment({
+        projectId: access.project.id,
+        taskId: String(req.body?.taskId || ''),
+        body,
+        author: requesterName(req) || access.email,
+    });
+    recordActivity({
+        actor: requesterName(req) || access.email,
+        role: getRole(req),
+        projectId: access.project.id,
+        eventType: 'comment.created',
+        action: `comment.created:${access.project.name}`,
+    });
+    realtime.broadcast({ type: 'comment.created', payload: comment });
+    res.status(201).json({ comment });
+});
+
+app.get('/api/projects/:projectId/sprints', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    res.json({ sprints: (await featureSnapshot(access.project.id)).sprints });
+});
+
+app.post('/api/projects/:projectId/sprints', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canEditProjectContent(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project access denied' });
+        return;
+    }
+    const name = String(req.body?.name || '').trim();
+    if (!name) {
+        res.status(400).json({ error: 'Sprint name is required' });
+        return;
+    }
+    const sprint = await createSprint({ ...req.body, projectId: access.project.id, name });
+    recordActivity({
+        actor: requesterName(req) || access.email,
+        role: getRole(req),
+        projectId: access.project.id,
+        eventType: 'sprint.created',
+        action: `sprint.created:${sprint.name}`,
+    });
+    realtime.broadcast({ type: 'sprint.created', payload: sprint });
+    res.status(201).json({ sprint });
+});
+
+app.patch('/api/projects/:projectId/sprints/:sprintId', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canEditProjectContent(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project access denied' });
+        return;
+    }
+    const sprint = await updateSprint(req.params.sprintId, req.body || {});
+    if (!sprint || sprint.projectId !== access.project.id) {
+        res.status(404).json({ error: 'Sprint not found' });
+        return;
+    }
+    recordActivity({
+        actor: requesterName(req) || access.email,
+        role: getRole(req),
+        projectId: access.project.id,
+        eventType: 'sprint.updated',
+        action: `sprint.updated:${sprint.name}`,
+    });
+    realtime.broadcast({ type: 'sprint.updated', payload: sprint });
+    res.json({ sprint });
+});
+
+app.get('/api/projects/:projectId/code-metrics', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    res.json({ codeMetrics: (await featureSnapshot(access.project.id)).codeMetrics });
+});
+
+app.post('/api/projects/:projectId/code-metrics', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canEditProjectContent(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project access denied' });
+        return;
+    }
+    const codeMetric = await upsertCodeMetrics({ ...req.body, projectId: access.project.id });
+    recordActivity({
+        actor: requesterName(req) || access.email,
+        role: getRole(req),
+        projectId: access.project.id,
+        eventType: 'code_metrics.synced',
+        action: `code_metrics.synced:${codeMetric.repository || access.project.name}`,
+    });
+    realtime.broadcast({ type: 'code_metrics.synced', payload: codeMetric });
+    res.status(201).json({ codeMetric });
+});
+
+app.post('/api/projects/:projectId/github/sync', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canEditProjectContent(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project access denied' });
+        return;
+    }
+    try {
+        const metrics = await fetchGitHubRepositoryMetrics(String(req.body?.repository || ''));
+        const codeMetric = await upsertCodeMetrics({
+            projectId: access.project.id,
+            provider: 'GitHub',
+            repository: metrics.fullName,
+            branch: metrics.defaultBranch,
+            commits: metrics.commits,
+            pullRequests: metrics.pullRequests,
+            openIssues: metrics.openIssues,
+            coverage: Number(req.body?.coverage || 0),
+            deploymentFrequency: metrics.deploymentFrequency,
+            leadTimeHours: metrics.leadTimeHours,
+            sourceUrl: metrics.sourceUrl,
+        });
+        await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'github.synced', entity: metrics.fullName });
+        recordActivity({ actor: requesterName(req) || access.email, role: getRole(req), projectId: access.project.id, eventType: 'github.synced', action: `github.synced:${metrics.fullName}` });
+        realtime.broadcast({ type: 'github.synced', payload: codeMetric });
+        res.status(201).json({ codeMetric, metrics });
+    } catch (error) {
+        res.status(400).json({ error: error instanceof Error ? error.message : 'GitHub sync failed' });
+    }
+});
+
+app.get('/api/projects/:projectId/alert-integrations', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    res.json({ alertIntegrations: (await featureSnapshot(access.project.id)).alertIntegrations });
+});
+
+app.post('/api/projects/:projectId/alert-integrations', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canManageProject(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project admin access required' });
+        return;
+    }
+    const provider = String(req.body?.provider || '').toLowerCase() === 'discord' ? 'Discord' : 'Slack';
+    const alertIntegration = await createAlertIntegration({ ...req.body, provider, projectId: access.project.id });
+    recordActivity({
+        actor: requesterName(req) || access.email,
+        role: getRole(req),
+        projectId: access.project.id,
+        eventType: 'alert_integration.created',
+        action: `alert_integration.created:${provider}`,
+    });
+    realtime.broadcast({ type: 'alert_integration.created', payload: alertIntegration });
+    res.status(201).json({ alertIntegration });
+});
+
+app.post('/api/projects/:projectId/alert-integrations/:integrationId/test', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canManageProject(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project admin access required' });
+        return;
+    }
+    const message = String(req.body?.message || `DevPilot test alert for ${access.project.name}`);
+    const result = await testAlertIntegration(req.params.integrationId, message);
+    if (!result || result.integration.projectId !== access.project.id) {
+        res.status(404).json({ error: 'Alert integration not found' });
+        return;
+    }
+    recordActivity({
+        actor: requesterName(req) || access.email,
+        role: getRole(req),
+        projectId: access.project.id,
+        eventType: 'alert_integration.tested',
+        action: `alert_integration.tested:${result.integration.provider}`,
+    });
+    res.json(result);
+});
+
+app.post('/api/projects/:projectId/assistant/incidents/:incidentId', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    const store = await readStoreAsync();
+    const incident = store.incidents.find((item) => item.id === req.params.incidentId && item.projectId === access.project.id);
+    if (!incident) {
+        res.status(404).json({ error: 'Incident not found' });
+        return;
+    }
+    const insight = await createIncidentAssistantInsight({
+        projectId: access.project.id,
+        incident,
+        deployments: store.deployments.filter((deployment) => deployment.projectId === access.project.id),
+        healthChecks: store.projectHealthChecks.filter((check) => check.projectId === access.project.id),
+    });
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'incident.assistant.generated', entity: incident.title });
+    recordActivity({ actor: requesterName(req) || access.email, role: getRole(req), projectId: access.project.id, eventType: 'incident.assistant.generated', action: `incident.assistant.generated:${incident.title}` });
+    realtime.broadcast({ type: 'incident.assistant.generated', payload: insight });
+    res.status(201).json({ insight });
+});
+
+app.post('/api/projects/:projectId/postmortems/:incidentId', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    const store = await readStoreAsync();
+    const incident = store.incidents.find((item) => item.id === req.params.incidentId && item.projectId === access.project.id);
+    if (!incident) {
+        res.status(404).json({ error: 'Incident not found' });
+        return;
+    }
+    const postmortem = await createPostmortem({
+        projectId: access.project.id,
+        incident,
+        deployments: store.deployments.filter((deployment) => deployment.projectId === access.project.id),
+        healthChecks: store.projectHealthChecks.filter((check) => check.projectId === access.project.id),
+    });
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'postmortem.generated', entity: incident.title });
+    recordActivity({ actor: requesterName(req) || access.email, role: getRole(req), projectId: access.project.id, eventType: 'postmortem.generated', action: `postmortem.generated:${incident.title}` });
+    realtime.broadcast({ type: 'postmortem.generated', payload: postmortem });
+    res.status(201).json({ postmortem });
+});
+
+app.post('/api/projects/:projectId/slos', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canEditProjectContent(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project access denied' });
+        return;
+    }
+    const name = String(req.body?.name || 'Availability SLO');
+    const slo = await upsertSlo({ ...req.body, projectId: access.project.id, name });
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'slo.upserted', entity: slo.name });
+    realtime.broadcast({ type: 'slo.upserted', payload: slo });
+    res.status(201).json({ slo });
+});
+
+app.post('/api/projects/:projectId/client-reports', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    const store = await readStoreAsync();
+    const report = await createClientReport({
+        projectId: access.project.id,
+        projectName: access.project.name,
+        format: String(req.body?.format || '').toLowerCase() === 'monthly' ? 'Monthly' : 'Weekly',
+        tasks: store.tasks.filter((task) => task.projectId === access.project.id),
+        deployments: store.deployments.filter((deployment) => deployment.projectId === access.project.id),
+        incidents: store.incidents.filter((incident) => incident.projectId === access.project.id),
+        healthChecks: store.projectHealthChecks.filter((check) => check.projectId === access.project.id),
+    });
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'client_report.generated', entity: report.period });
+    recordActivity({ actor: requesterName(req) || access.email, role: getRole(req), projectId: access.project.id, eventType: 'client_report.generated', action: `client_report.generated:${report.format}` });
+    realtime.broadcast({ type: 'client_report.generated', payload: report });
+    res.status(201).json({ report });
+});
+
+app.post('/api/projects/:projectId/release-approvals', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    const title = String(req.body?.title || '').trim();
+    if (!title) {
+        res.status(400).json({ error: 'Approval title is required' });
+        return;
+    }
+    const approval = await createReleaseApproval({ ...req.body, projectId: access.project.id, title, requester: requesterName(req) || access.email });
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'release_approval.created', entity: approval.title });
+    realtime.broadcast({ type: 'release_approval.created', payload: approval });
+    res.status(201).json({ approval });
+});
+
+app.patch('/api/projects/:projectId/release-approvals/:approvalId', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canManageProject(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project admin access required' });
+        return;
+    }
+    const approval = await updateReleaseApproval(req.params.approvalId, { ...req.body, approver: requesterName(req) || access.email });
+    if (!approval || approval.projectId !== access.project.id) {
+        res.status(404).json({ error: 'Release approval not found' });
+        return;
+    }
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: `release_approval.${String(approval.status).toLowerCase()}`, entity: approval.title });
+    realtime.broadcast({ type: 'release_approval.updated', payload: approval });
+    res.json({ approval });
+});
+
+app.put('/api/projects/:projectId/status-page', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canEditProjectContent(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project access denied' });
+        return;
+    }
+    const statusPage = await upsertStatusPage({ ...req.body, projectId: access.project.id, projectName: access.project.name });
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'status_page.updated', entity: statusPage.publicSlug });
+    realtime.broadcast({ type: 'status_page.updated', payload: statusPage });
+    res.json({ statusPage });
+});
+
+app.put('/api/projects/:projectId/on-call', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canManageProject(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project admin access required' });
+        return;
+    }
+    const schedule = await upsertOnCall({ ...req.body, projectId: access.project.id });
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'on_call.updated', entity: schedule.primary || access.project.name });
+    realtime.broadcast({ type: 'on_call.updated', payload: schedule });
+    res.json({ schedule });
+});
+
+app.post('/api/projects/:projectId/alert-rules', async (req, res) => {
+    const access = await loadAccessibleProject(req, res);
+    if (!access) return;
+    if (!canEditProjectContent(access.project, access.email, getRole(req))) {
+        res.status(403).json({ error: 'Project access denied' });
+        return;
+    }
+    const name = String(req.body?.name || '').trim();
+    if (!name) {
+        res.status(400).json({ error: 'Alert rule name is required' });
+        return;
+    }
+    const rule = await createAlertRule({ ...req.body, projectId: access.project.id, name });
+    const evaluations = await evaluateProjectAlertsFor(access.project.id, 'rule-created');
+    await recordAudit({ projectId: access.project.id, actor: requesterName(req) || access.email, action: 'alert_rule.created', entity: rule.name });
+    realtime.broadcast({ type: 'alert_rule.created', payload: rule });
+    res.status(201).json({ rule, evaluations });
 });
 
 app.get('/api/tasks', async (req, res) => {
@@ -595,7 +1505,7 @@ app.get('/api/tasks', async (req, res) => {
     if (!email) return;
     const projectId = String(req.query.projectId || '');
     const store = await readStoreAsync();
-    const projectIds = new Set(visibleProjects(store.projects, email).map((project) => project.id));
+    const projectIds = new Set(visibleProjects(store.projects, email, getRole(req), requesterWorkspaceId(req)).map((project) => project.id));
     const tasks = store.tasks.filter((task) => projectIds.has(task.projectId) && (!projectId || task.projectId === projectId));
     res.json({ tasks });
 });
@@ -608,7 +1518,7 @@ app.post('/api/tasks', async (req, res) => {
         res.status(404).json({ error: 'Project not found' });
         return;
     }
-    if (!canEditProjectContent(project, email)) {
+    if (!canEditProjectContent(project, email, getRole(req))) {
         res.status(403).json({ error: 'Project access denied' });
         return;
     }
@@ -617,6 +1527,8 @@ app.post('/api/tasks', async (req, res) => {
     recordActivity({
         actor: req.header('x-user') || 'product',
         role: getRole(req),
+        projectId: task.projectId,
+        eventType: 'task.created',
         action: `task.created:${task.title}`,
     });
     await syncGrafanaCloud('task.created');
@@ -629,16 +1541,21 @@ app.patch('/api/tasks/:id', async (req, res) => {
     if (!email) return;
     const store = await readStoreAsync();
     const existing = store.tasks.find((item) => item.id === req.params.id);
-    const project = existing ? store.projects.find((item) => item.id === existing.projectId) : undefined;
-    if (!existing || !project) {
+    const fallbackProjectId = String(req.body?.projectId || '');
+    const project = existing
+        ? store.projects.find((item) => item.id === existing.projectId)
+        : store.projects.find((item) => item.id === fallbackProjectId);
+    if (!project) {
         res.status(404).json({ error: 'Task not found' });
         return;
     }
-    if (!canEditProjectContent(project, email)) {
+    if (!canEditProjectContent(project, email, getRole(req))) {
         res.status(403).json({ error: 'Task access denied' });
         return;
     }
-    const task = await updateTask(req.params.id, req.body || {});
+    const task = existing
+        ? await updateTask(req.params.id, req.body || {})
+        : await createTask({ ...(req.body || {}), id: req.params.id, projectId: project.id });
     if (!task) {
         res.status(404).json({ error: 'Task not found' });
         return;
@@ -646,10 +1563,15 @@ app.patch('/api/tasks/:id', async (req, res) => {
     recordActivity({
         actor: req.header('x-user') || 'product',
         role: getRole(req),
+        projectId: task.projectId,
+        eventType: task.status === 'DONE' ? 'task.completed' : 'task.updated',
         action: req.body?.status === 'DONE' ? `task.completed:${task.title}` : req.body?.status ? `task.updated:${task.title}` : `task.updated:${task.title}`,
     });
     await syncGrafanaCloud('task.updated');
     realtime.broadcast({ type: 'task.updated', payload: task });
+    if (existing?.status !== 'DONE' && task.status === 'DONE') {
+        realtime.broadcast({ type: 'task.completed', payload: task });
+    }
     res.json({ task });
 });
 
@@ -663,7 +1585,7 @@ app.delete('/api/tasks/:id', async (req, res) => {
         res.status(404).json({ error: 'Task not found' });
         return;
     }
-    if (!canEditProjectContent(project, email)) {
+    if (!canEditProjectContent(project, email, getRole(req))) {
         res.status(403).json({ error: 'Task access denied' });
         return;
     }
@@ -686,7 +1608,7 @@ app.get('/api/deployments', async (req, res) => {
     if (!email) return;
     const projectId = String(req.query.projectId || '');
     const store = await readStoreAsync();
-    const projectIds = new Set(visibleProjects(store.projects, email).map((project) => project.id));
+    const projectIds = new Set(visibleProjects(store.projects, email, getRole(req), requesterWorkspaceId(req)).map((project) => project.id));
     const deployments = store.deployments.filter((deployment) => projectIds.has(deployment.projectId) && (!projectId || deployment.projectId === projectId));
     res.json({ deployments });
 });
@@ -699,7 +1621,7 @@ app.post('/api/deployments', async (req, res) => {
         res.status(404).json({ error: 'Project not found' });
         return;
     }
-    if (!canEditProjectContent(project, email)) {
+    if (!canEditProjectContent(project, email, getRole(req))) {
         res.status(403).json({ error: 'Project access denied' });
         return;
     }
@@ -708,9 +1630,12 @@ app.post('/api/deployments', async (req, res) => {
     recordActivity({
         actor: req.header('x-user') || 'release',
         role: getRole(req),
+        projectId: deployment.projectId,
+        eventType: ['Failed', 'Rolled Back'].includes(deployment.status) ? 'deployment.failed' : 'deployment.created',
         action: `deployment.added:${deployment.version}`,
     });
     await recordDeploymentFailureIncident(deployment, req.header('x-user') || deployment.triggeredBy || deployment.provider);
+    await evaluateProjectAlertsFor(deployment.projectId, 'deployment').catch((error) => console.error('Alert evaluation failed', error));
     await syncGrafanaCloud('deployment.created');
     realtime.broadcast({ type: 'deployment.created', payload: deployment });
     res.status(201).json({ deployment });
@@ -728,9 +1653,12 @@ app.post('/api/projects/:projectId/deployments/webhook', async (req, res) => {
     recordActivity({
         actor: req.header('x-user') || deployment.triggeredBy || deployment.provider,
         role: getRole(req),
+        projectId: deployment.projectId,
+        eventType: ['Failed', 'Rolled Back'].includes(deployment.status) ? 'deployment.failed' : 'deployment.created',
         action: `deployment.added:${deployment.version}`,
     });
     await recordDeploymentFailureIncident(deployment, req.header('x-user') || deployment.triggeredBy || deployment.provider);
+    await evaluateProjectAlertsFor(deployment.projectId, 'deployment-webhook').catch((error) => console.error('Alert evaluation failed', error));
     await syncGrafanaCloud('deployment.webhook');
     realtime.broadcast({ type: 'deployment.created', payload: deployment });
     res.status(201).json({ deployment });
@@ -767,9 +1695,12 @@ const handleDeploymentWebhook = async (req: express.Request, res: express.Respon
     recordActivity({
         actor: deployment.triggeredBy || deployment.provider,
         role: 'system',
+        projectId: deployment.projectId,
+        eventType: ['Failed', 'Rolled Back'].includes(deployment.status) ? 'deployment.failed' : 'deployment.created',
         action: `deployment.added:${deployment.version}`,
     });
     await recordDeploymentFailureIncident(deployment, deployment.triggeredBy || deployment.provider);
+    await evaluateProjectAlertsFor(deployment.projectId, 'platform-webhook').catch((error) => console.error('Alert evaluation failed', error));
     await syncGrafanaCloud('deployment.platform-webhook');
     realtime.broadcast({ type: 'deployment.created', payload: deployment });
     res.status(201).json({ deployment });
@@ -787,7 +1718,7 @@ app.get('/api/incidents', async (req, res) => {
     if (!email) return;
     const projectId = String(req.query.projectId || '');
     const store = await readStoreAsync();
-    const projectIds = new Set(visibleProjects(store.projects, email).map((project) => project.id));
+    const projectIds = new Set(visibleProjects(store.projects, email, getRole(req), requesterWorkspaceId(req)).map((project) => project.id));
     const incidents = store.incidents.filter((incident) => projectIds.has(incident.projectId) && (!projectId || incident.projectId === projectId));
     res.json({ incidents });
 });
@@ -800,7 +1731,7 @@ app.post('/api/incidents', async (req, res) => {
         res.status(404).json({ error: 'Project not found' });
         return;
     }
-    if (!canEditProjectContent(project, email)) {
+    if (!canEditProjectContent(project, email, getRole(req))) {
         res.status(403).json({ error: 'Project access denied' });
         return;
     }
@@ -809,9 +1740,12 @@ app.post('/api/incidents', async (req, res) => {
     recordActivity({
         actor: req.header('x-user') || 'support',
         role: getRole(req),
+        projectId: incident.projectId,
+        eventType: 'incident.created',
         action: `incident.created:${incident.title}`,
     });
     await syncGrafanaCloud('incident.created');
+    await evaluateProjectAlertsFor(incident.projectId, 'incident-created').catch((error) => console.error('Alert evaluation failed', error));
     realtime.broadcast({ type: 'incident.created', payload: incident });
     res.status(201).json({ incident });
 });
@@ -826,7 +1760,7 @@ app.patch('/api/incidents/:id', async (req, res) => {
         res.status(404).json({ error: 'Incident not found' });
         return;
     }
-    if (!canEditProjectContent(project, email)) {
+    if (!canEditProjectContent(project, email, getRole(req))) {
         res.status(403).json({ error: 'Incident access denied' });
         return;
     }
@@ -838,9 +1772,15 @@ app.patch('/api/incidents/:id', async (req, res) => {
     recordActivity({
         actor: req.header('x-user') || 'support',
         role: getRole(req),
-        action: `incident.updated:${incident.title}`,
+        projectId: incident.projectId,
+        eventType: existing.status !== 'Resolved' && incident.status === 'Resolved' ? 'incident.resolved' : 'incident.updated',
+        action: existing.status !== 'Resolved' && incident.status === 'Resolved' ? `incident.resolved:${incident.title}` : `incident.updated:${incident.title}`,
     });
     realtime.broadcast({ type: 'incident.updated', payload: incident });
+    await evaluateProjectAlertsFor(incident.projectId, 'incident-updated').catch((error) => console.error('Alert evaluation failed', error));
+    if (existing.status !== 'Resolved' && incident.status === 'Resolved') {
+        realtime.broadcast({ type: 'incident.resolved', payload: incident });
+    }
     res.json({ incident });
 });
 
@@ -852,11 +1792,15 @@ app.post('/api/tasks/reset', async (_req, res) => {
 const healthPayload = (service: string) => ({
     status: 'healthy',
     service,
+    version: apiConfig.version,
+    environment: apiConfig.nodeEnv,
+    uptimeSeconds: Math.round(process.uptime()),
+    database: databaseInfo(),
     timestamp: new Date().toISOString(),
 });
 
 const serviceChecks = [
-    { name: 'API Gateway', service: 'api-gateway', path: '/gateway/health', url: process.env.GATEWAY_HEALTH_URL || 'http://localhost:3000/gateway/health' },
+    { name: 'API Gateway', service: 'api-gateway', path: '/gateway/health', url: process.env.GATEWAY_HEALTH_URL || `http://localhost:${PORT}/gateway/health` },
     { name: 'Auth Service', service: 'auth-service', path: '/auth/health', url: process.env.AUTH_HEALTH_URL || 'http://localhost:3001/health' },
     { name: 'Project Service', service: 'project-service', path: '/project/health', url: process.env.PROJECT_HEALTH_URL || 'http://localhost:3002/health' },
     { name: 'Analytics Service', service: 'analytics-service', path: '/analytics/health', url: process.env.ANALYTICS_HEALTH_URL || 'http://localhost:3003/health' },
@@ -935,12 +1879,118 @@ app.get('/api/monitoring/summary', (_req, res) => {
     res.json(requestHealthSummary());
 });
 
-app.get('/metrics', async (_req, res) => {
-    if (process.env.CHECK_PROJECTS_ON_METRICS !== 'false') {
+app.get('/api/grafana/status', async (_req, res) => {
+    const result = await syncGrafanaCloud('status.check');
+    res.json({ ...grafanaCloudStatus(), check: result });
+});
+
+app.post('/api/grafana/provision', async (req, res) => {
+    const cronSecret = process.env.CRON_SECRET;
+    if (!cronSecret || req.header('authorization') !== `Bearer ${cronSecret}`) {
+        res.status(401).json({ error: 'Unauthorized Grafana provisioning request' });
+        return;
+    }
+
+    const result = await provisionGrafanaCloudDashboards();
+    res.status(result.ok ? 200 : 502).json(result);
+});
+
+app.post('/api/admin/seed-public-projects', async (req, res) => {
+    const cronSecret = process.env.CRON_SECRET;
+    if (!cronSecret || req.header('authorization') !== `Bearer ${cronSecret}`) {
+        res.status(401).json({ error: 'Unauthorized seed request' });
+        return;
+    }
+
+    const limit = Math.max(1, Math.min(100, Number(req.body?.limit || req.query.limit || 100)));
+    const concurrency = Math.max(1, Math.min(25, Number(req.body?.concurrency || req.query.concurrency || 20)));
+    const seed = await ensurePublicProjectCatalog(limit);
+    const projectIds = new Set(seed.projectIds);
+    const projects = (await listProjectsAsync())
+        .filter((project) => projectIds.has(project.id) && project.status === 'Active' && project.appUrl);
+    const checks = await runProjectHealthChecksForProjects(projects, concurrency);
+    const grafana = await syncGrafanaCloud('public.project.catalog.seed', { force: true });
+    realtime.broadcast({
+        type: 'project.catalog.seeded',
+        payload: { requested: seed.requested, created: seed.created, existing: seed.existing, healthChecks: checks.length },
+    });
+    res.json({
+        ok: true,
+        seed: {
+            requested: seed.requested,
+            created: seed.created,
+            existing: seed.existing,
+            projects: seed.projectIds.length,
+        },
+        healthChecks: checks.length,
+        grafana,
+        at: new Date().toISOString(),
+    });
+});
+
+app.post('/api/demo/workspace', requireRole(['owner', 'admin']), async (req, res) => {
+    const email = requireRequesterEmail(req, res);
+    if (!email) return;
+
+    const limit = Math.max(10, Math.min(100, Number(req.body?.limit || 100)));
+    const seed = await ensurePublicProjectCatalog(limit);
+    const store = await readStoreAsync();
+    const visible = visibleProjects(store.projects, email, getRole(req), requesterWorkspaceId(req));
+    const activeProjects = visible.filter((project) => project.status === 'Active' && project.appUrl).slice(0, 12);
+    const checks = await runProjectHealthChecksForProjects(activeProjects, 6);
+    const grafana = await syncGrafanaCloud('demo.workspace.prepared', { force: true });
+    const log = recordActivity({
+        actor: requesterName(req) || email,
+        role: getRole(req),
+        eventType: 'demo.workspace.prepared',
+        action: `demo.workspace.prepared:${seed.projectIds.length} public projects`,
+    });
+    realtime.broadcast({
+        type: 'demo.workspace.prepared',
+        payload: {
+            projects: seed.projectIds.length,
+            created: seed.created,
+            existing: seed.existing,
+            healthChecks: checks.length,
+        },
+    });
+    res.json({
+        ok: true,
+        activity: log,
+        seed: {
+            requested: seed.requested,
+            created: seed.created,
+            existing: seed.existing,
+            projects: seed.projectIds.length,
+        },
+        totals: {
+            visibleProjects: visible.length,
+            healthChecks: checks.length,
+        },
+        grafana,
+        at: new Date().toISOString(),
+    });
+});
+
+app.get('/metrics', async (req, res) => {
+    const accept = String(req.header('accept') || '').toLowerCase();
+    const userAgent = String(req.header('user-agent') || '').toLowerCase();
+    const wantsRawMetrics = req.query.raw === '1'
+        || accept.includes('openmetrics')
+        || accept.includes('text/plain')
+        || userAgent.includes('prometheus')
+        || userAgent.includes('grafana')
+        || userAgent.includes('curl');
+    const wantsBrowserPage = !wantsRawMetrics;
+    if (wantsBrowserPage) {
+        res.redirect(302, '/app/monitoring');
+        return;
+    }
+    if (apiConfig.checkProjectsOnMetrics) {
         await runProjectHealthChecks().catch((error) => console.error('Project health check failed', error));
     }
     await syncGrafanaCloud('metrics.scrape');
-    res.type('text/plain').send(await renderMetrics());
+    res.type(metricsContentType()).send(await renderMetrics());
 });
 
 app.get('/api/cron/push-metrics', async (req, res) => {
@@ -955,8 +2005,38 @@ app.get('/api/cron/push-metrics', async (req, res) => {
     res.json({ ok: true, result, at: new Date().toISOString() });
 });
 
-app.get('/activity', (_req, res) => {
-    res.json(listActivity());
+const notificationTitle = (log: { eventType?: string; action: string }) => {
+    const type = log.eventType || log.action.split(':')[0];
+    const labels: Record<string, string> = {
+        'project.created': 'Project created',
+        'project.deleted': 'Project deleted',
+        'task.created': 'Task created',
+        'task.completed': 'Task completed',
+        'deployment.created': 'Deployment created',
+        'deployment.failed': 'Deployment failed',
+        'incident.created': 'Incident created',
+        'incident.resolved': 'Incident resolved',
+        'project.health.failed': 'Health check failed',
+        'project.invite.created': 'Invite sent',
+        'github.synced': 'Repository synced',
+        'alert_rule.created': 'Alert rule created',
+        'client_report.generated': 'Client report generated',
+    };
+    return labels[type] || type.replace(/[._]/g, ' ');
+};
+
+app.get('/activity', async (req, res) => {
+    const hasFilters = req.query.projectId || req.query.eventType || req.query.from || req.query.to;
+    if (!hasFilters) {
+        res.json(await listActivity());
+        return;
+    }
+    res.json(await queryActivity({
+        projectId: String(req.query.projectId || ''),
+        eventType: String(req.query.eventType || ''),
+        from: String(req.query.from || ''),
+        to: String(req.query.to || ''),
+    }));
 });
 
 app.post('/activity', (req, res) => {
@@ -964,10 +2044,35 @@ app.post('/activity', (req, res) => {
     const log = recordActivity({
         actor: req.header('x-user') || 'system',
         role,
+        projectId: req.body?.projectId,
+        eventType: req.body?.eventType,
         action: req.body?.action || 'activity.recorded',
     });
     realtime.broadcast({ type: 'activity', payload: log });
     res.json(log);
+});
+
+app.get('/api/notifications', requireAuth, async (req, res) => {
+    const email = requireRequesterEmail(req, res);
+    if (!email) return;
+
+    const store = await readStoreAsync();
+    const projectIds = new Set(visibleProjects(store.projects, email, getRole(req), requesterWorkspaceId(req)).map((project) => project.id));
+    const logs = (await queryActivity({})).filter((log) => !log.projectId || projectIds.has(log.projectId));
+    res.json({
+        notifications: logs.slice(0, 50).map((log) => {
+            const [, ...detailParts] = log.action.split(':');
+            return {
+                id: log.id,
+                type: log.eventType || log.action.split(':')[0],
+                title: notificationTitle(log),
+                detail: detailParts.join(':') || log.action,
+                timestamp: log.timestamp,
+                projectId: log.projectId || '',
+                actor: log.actor,
+            };
+        }),
+    });
 });
 
 app.get('/search', async (req, res) => {
@@ -1020,16 +2125,35 @@ if (process.env.ENABLE_SERVICE_PROXY === 'true') {
     });
 }
 
+app.use((req, res) => {
+    res.status(404).json({
+        error: 'Not Found',
+        path: req.originalUrl,
+        requestId: res.locals.requestId,
+    });
+});
+
+app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    const message = error instanceof Error ? error.message : 'Unexpected server error';
+    console.error('Unhandled request error', { requestId: res.locals.requestId, error });
+    res.status(500).json({
+        error: 'Internal Server Error',
+        message: apiConfig.isProduction ? 'Unexpected server error' : message,
+        requestId: res.locals.requestId,
+    });
+});
+
 if (!isServerless) {
     startJobWorker(realtime.broadcast);
     runProjectHealthChecks().catch((error) => console.error('Project health check failed', error));
     setInterval(() => {
         runProjectHealthChecks().catch((error) => console.error('Project health check failed', error));
-    }, Number(process.env.PROJECT_HEALTH_CHECK_INTERVAL_MS || 30000));
+    }, apiConfig.projectHealthCheckIntervalMs);
 
     // Start the server
     server.listen(PORT, () => {
         console.log(`API Gateway is running on http://localhost:${PORT}`);
+        startupWarnings().forEach((warning) => console.warn(`Startup warning: ${warning}`));
         // NOTE(git:perf/gateway): add connection pooling + keep-alive tuning
     });
 }

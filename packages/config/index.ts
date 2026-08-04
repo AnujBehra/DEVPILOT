@@ -78,7 +78,7 @@ const config = {
   uiux: {
     theme: process.env.UI_THEME || 'system',
     designSystem: 'shadcn-ui',
-    inspirations: ['Linear', 'Jira', 'Vercel', 'Datadog', 'GitHub', 'Grafana'],
+    inspirations: ['Linear', 'DevPilot', 'Vercel', 'Datadog', 'GitHub', 'Grafana'],
     // NOTE(git:feat/uiux): add command palette + terminal-inspired widgets
   },
   runtime: {

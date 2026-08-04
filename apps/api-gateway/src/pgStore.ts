@@ -2,13 +2,26 @@ import { Pool } from 'pg';
 import { v4 as uuid } from 'uuid';
 import type { Deployment, Incident, Priority, Project, ProjectHealthCheck, ProjectMember, ProjectRole, StoreState, Task, TaskStatus } from './store';
 
-const pool = process.env.DATABASE_URL
-  ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
-  : null;
+const shouldUseSsl = (connectionString: string) => {
+  if (/sslmode=(require|verify-ca|verify-full)/i.test(connectionString)) return true;
+  if (/sslmode=disable/i.test(connectionString)) return false;
+  return !/localhost|127\.0\.0\.1|postgres:5432/i.test(connectionString);
+};
+
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  throw new Error('DATABASE_URL is required. DevPilot uses PostgreSQL only.');
+}
+
+const pool = new Pool({
+  connectionString: databaseUrl,
+  ssl: shouldUseSsl(databaseUrl) ? { rejectUnauthorized: false } : false,
+});
 
 let initialized: Promise<void> | null = null;
 const now = () => new Date().toISOString();
 const json = (value: unknown) => JSON.stringify(value);
+const DEFAULT_WORKSPACE_ID = process.env.DEVPILOT_WORKSPACE_ID || 'my-software-team';
 
 const normalizeAppUrl = (value: unknown) => {
   const raw = String(value || '').trim();
@@ -90,14 +103,30 @@ const parseProjectMembers = (value: string | null | undefined, ownerName: unknow
 };
 
 const query = async (text: string, params: unknown[] = []) => {
-  if (!pool) throw new Error('DATABASE_URL is not configured');
   await init();
   return pool.query(text, params);
 };
 
+const runMigration = async (id: string, migrate: () => Promise<void>) => {
+  const existing = await pool.query('SELECT id FROM schema_migrations WHERE id = $1 LIMIT 1', [id]);
+  if (existing.rows[0]) return;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await migrate();
+    await client.query('INSERT INTO schema_migrations (id, applied_at) VALUES ($1, $2)', [id, now()]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
 const ensureProjectOwnerEmailColumn = async () => {
   try {
-    await pool?.query(`ALTER TABLE projects ADD COLUMN owner_email TEXT NOT NULL DEFAULT ''`);
+    await pool.query(`ALTER TABLE projects ADD COLUMN owner_email TEXT NOT NULL DEFAULT ''`);
   } catch (error: any) {
     if (error?.code !== '42701') throw error;
   }
@@ -105,7 +134,7 @@ const ensureProjectOwnerEmailColumn = async () => {
 
 const ensureProjectDeploymentPlatformColumn = async () => {
   try {
-    await pool?.query(`ALTER TABLE projects ADD COLUMN deployment_platform TEXT NOT NULL DEFAULT 'Other'`);
+    await pool.query(`ALTER TABLE projects ADD COLUMN deployment_platform TEXT NOT NULL DEFAULT 'Other'`);
   } catch (error: any) {
     if (error?.code !== '42701') throw error;
   }
@@ -113,26 +142,38 @@ const ensureProjectDeploymentPlatformColumn = async () => {
 
 const ensureProjectMembersColumn = async () => {
   try {
-    await pool?.query(`ALTER TABLE projects ADD COLUMN members_json TEXT NOT NULL DEFAULT '[]'`);
+    await pool.query(`ALTER TABLE projects ADD COLUMN members_json TEXT NOT NULL DEFAULT '[]'`);
   } catch (error: any) {
     if (error?.code !== '42701') throw error;
   }
 };
 const ensureProjectKeyColumn = async () => {
   try {
-    await pool?.query(`ALTER TABLE projects ADD COLUMN project_key TEXT NOT NULL DEFAULT 'PROJ'`);
+    await pool.query(`ALTER TABLE projects ADD COLUMN project_key TEXT NOT NULL DEFAULT 'PROJ'`);
+  } catch (error: any) {
+    if (error?.code !== '42701') throw error;
+  }
+};
+const ensureIncidentRelatedDeploymentColumn = async () => {
+  try {
+    await pool.query(`ALTER TABLE incidents ADD COLUMN related_deployment_id TEXT NOT NULL DEFAULT ''`);
   } catch (error: any) {
     if (error?.code !== '42701') throw error;
   }
 };
 
 export const init = async () => {
-  if (!pool) return;
   if (initialized) return initialized;
   initialized = (async () => {
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        id TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'my-software-team',
         name TEXT NOT NULL,
         project_key TEXT NOT NULL DEFAULT 'PROJ',
         description TEXT NOT NULL,
@@ -184,6 +225,7 @@ export const init = async () => {
       CREATE TABLE IF NOT EXISTS incidents (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL DEFAULT '',
+        related_deployment_id TEXT NOT NULL DEFAULT '',
         title TEXT NOT NULL,
         description TEXT NOT NULL DEFAULT '',
         severity TEXT NOT NULL,
@@ -209,12 +251,22 @@ export const init = async () => {
     await ensureProjectDeploymentPlatformColumn();
     await ensureProjectMembersColumn();
     await ensureProjectKeyColumn();
+    await ensureIncidentRelatedDeploymentColumn();
+    await runMigration('20260629_001_workspace_ids', async () => {
+      try {
+        await pool.query(`ALTER TABLE projects ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '${DEFAULT_WORKSPACE_ID.replace(/'/g, "''")}'`);
+      } catch (error: any) {
+        if (error?.code !== '42701') throw error;
+      }
+      await pool.query(`UPDATE projects SET workspace_id = $1 WHERE workspace_id IS NULL OR workspace_id = ''`, [DEFAULT_WORKSPACE_ID]);
+    });
   })();
   return initialized;
 };
 
 const projectFromRow = (row: any): Project => ({
   id: row.id,
+  workspaceId: row.workspace_id || DEFAULT_WORKSPACE_ID,
   name: row.name,
   projectKey: normalizeProjectKey(row.project_key, row.name),
   description: row.description,
@@ -266,6 +318,7 @@ const deploymentFromRow = (row: any): Deployment => ({
 const incidentFromRow = (row: any): Incident => ({
   id: row.id,
   projectId: row.project_id,
+  relatedDeploymentId: row.related_deployment_id || '',
   title: row.title,
   description: row.description || row.summary,
   severity: row.severity,
@@ -314,6 +367,7 @@ export const createProject = async (input: Partial<Project>) => {
   const timestamp = now();
   const project: Project = {
     id: uuid(),
+    workspaceId: String(input.workspaceId || DEFAULT_WORKSPACE_ID),
     name: String(input.name || 'Untitled project'),
     projectKey: normalizeProjectKey(input.projectKey, input.name || 'Untitled project'),
     description: String(input.description || ''),
@@ -329,9 +383,9 @@ export const createProject = async (input: Partial<Project>) => {
     updatedAt: timestamp,
   };
   await query(
-    `INSERT INTO projects (id, name, project_key, description, owner, owner_email, members_json, service_name, deployment_platform, app_url, deployment_webhook_token, status, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-    [project.id, project.name, project.projectKey, project.description, project.owner, project.ownerEmail, json(project.members), project.serviceName, project.deploymentPlatform, project.appUrl, project.deploymentWebhookToken, project.status, project.createdAt, project.updatedAt],
+    `INSERT INTO projects (id, workspace_id, name, project_key, description, owner, owner_email, members_json, service_name, deployment_platform, app_url, deployment_webhook_token, status, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+    [project.id, project.workspaceId, project.name, project.projectKey, project.description, project.owner, project.ownerEmail, json(project.members), project.serviceName, project.deploymentPlatform, project.appUrl, project.deploymentWebhookToken, project.status, project.createdAt, project.updatedAt],
   );
   return project;
 };
@@ -345,23 +399,41 @@ export const updateProject = async (id: string, patch: Partial<Project>) => {
   updated.members = normalizeProjectMembers(updated.members, updated.owner, updated.ownerEmail);
   updated.appUrl = normalizeAppUrl(updated.appUrl);
   await query(
-    `UPDATE projects SET name=$1, project_key=$2, description=$3, owner=$4, owner_email=$5, members_json=$6, service_name=$7, deployment_platform=$8, app_url=$9, deployment_webhook_token=$10, status=$11, updated_at=$12 WHERE id=$13`,
-    [updated.name, updated.projectKey, updated.description, updated.owner, updated.ownerEmail, json(updated.members), updated.serviceName, updated.deploymentPlatform, updated.appUrl, updated.deploymentWebhookToken || uuid(), updated.status, updated.updatedAt, id],
+    `UPDATE projects SET workspace_id=$1, name=$2, project_key=$3, description=$4, owner=$5, owner_email=$6, members_json=$7, service_name=$8, deployment_platform=$9, app_url=$10, deployment_webhook_token=$11, status=$12, updated_at=$13 WHERE id=$14`,
+    [updated.workspaceId || DEFAULT_WORKSPACE_ID, updated.name, updated.projectKey, updated.description, updated.owner, updated.ownerEmail, json(updated.members), updated.serviceName, updated.deploymentPlatform, updated.appUrl, updated.deploymentWebhookToken || uuid(), updated.status, updated.updatedAt, id],
   );
   return updated;
 };
 
 export const deleteProject = async (id: string) => {
-  const taskCount = Number((await query('SELECT COUNT(*)::int AS count FROM tasks WHERE project_id = $1', [id])).rows[0]?.count || 0);
-  if (taskCount > 0) return false;
-  const result = await query('DELETE FROM projects WHERE id = $1', [id]);
-  return (result.rowCount || 0) > 0;
+  await init();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query('SELECT id FROM projects WHERE id = $1 LIMIT 1', [id]);
+    if (!existing.rows[0]) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    await client.query('DELETE FROM project_health_checks WHERE project_id = $1', [id]);
+    await client.query('DELETE FROM incidents WHERE project_id = $1', [id]);
+    await client.query('DELETE FROM deployments WHERE project_id = $1', [id]);
+    await client.query('DELETE FROM tasks WHERE project_id = $1', [id]);
+    await client.query('DELETE FROM projects WHERE id = $1', [id]);
+    await client.query('COMMIT');
+    return true;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 export const createTask = async (input: Partial<Task>) => {
   const timestamp = now();
   const task: Task = {
-    id: uuid(),
+    id: String(input.id || uuid()),
     projectId: String(input.projectId || ''),
     title: String(input.title || 'Untitled task'),
     description: String(input.description || ''),
@@ -437,8 +509,9 @@ export const listIncidents = async (): Promise<Incident[]> =>
 
 export const createIncident = async (input: Partial<Incident>) => {
   const incident: Incident = {
-    id: String(input.id || `INC-${Date.now()}`),
+    id: String(input.id || uuid()),
     projectId: String(input.projectId || ''),
+    relatedDeploymentId: String(input.relatedDeploymentId || ''),
     title: String(input.title || 'Untitled incident'),
     description: String(input.description || ''),
     severity: input.severity || 'Medium',
@@ -449,9 +522,9 @@ export const createIncident = async (input: Partial<Incident>) => {
     summary: String(input.summary || input.description || ''),
   };
   await query(
-    `INSERT INTO incidents (id, project_id, title, description, severity, status, service, created_at, resolved_at, summary)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-    [incident.id, incident.projectId, incident.title, incident.description, incident.severity, incident.status, incident.service, incident.createdAt, incident.resolvedAt, incident.summary],
+    `INSERT INTO incidents (id, project_id, related_deployment_id, title, description, severity, status, service, created_at, resolved_at, summary)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [incident.id, incident.projectId, incident.relatedDeploymentId, incident.title, incident.description, incident.severity, incident.status, incident.service, incident.createdAt, incident.resolvedAt, incident.summary],
   );
   return incident;
 };
@@ -462,8 +535,8 @@ export const updateIncident = async (id: string, patch: Partial<Incident>) => {
   const current = incidentFromRow(row);
   const updated = { ...current, ...patch, id, resolvedAt: patch.status === 'Resolved' && !patch.resolvedAt ? now() : patch.resolvedAt ?? current.resolvedAt };
   await query(
-    `UPDATE incidents SET project_id=$1,title=$2,description=$3,severity=$4,status=$5,service=$6,resolved_at=$7,summary=$8 WHERE id=$9`,
-    [updated.projectId, updated.title, updated.description, updated.severity, updated.status, updated.service, updated.resolvedAt, updated.summary || updated.description, id],
+    `UPDATE incidents SET project_id=$1,related_deployment_id=$2,title=$3,description=$4,severity=$5,status=$6,service=$7,resolved_at=$8,summary=$9 WHERE id=$10`,
+    [updated.projectId, updated.relatedDeploymentId, updated.title, updated.description, updated.severity, updated.status, updated.service, updated.resolvedAt, updated.summary || updated.description, id],
   );
   return updated;
 };
@@ -500,4 +573,10 @@ export const resetStore = async () => {
   return readStore();
 };
 
-export const databaseInfo = () => ({ engine: 'Postgres', path: 'DATABASE_URL', tables: ['projects', 'tasks', 'deployments', 'incidents', 'project_health_checks'] });
+export const databaseInfo = () => ({
+  engine: 'Postgres',
+  path: 'DATABASE_URL',
+  durable: true,
+  workspaceId: DEFAULT_WORKSPACE_ID,
+  tables: ['schema_migrations', 'projects', 'tasks', 'deployments', 'incidents', 'project_health_checks', 'product_feature_state'],
+});

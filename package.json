@@ -1,16 +1,23 @@
 {
-  "name": "devpilot-ai",
+  "name": "devpilot",
   "version": "1.0.0",
-  "description": "AI-powered DevOps Project Management SaaS platform",
+  "description": "Production-ready DevOps project management and observability platform.",
   "main": "index.js",
   "scripts": {
-    "start": "npm --prefix apps/api-gateway start",
+    "start": "DATABASE_URL=postgres://devpilot:devpilot@localhost:5432/devpilot npm --prefix apps/api-gateway start",
+    "local": "bash scripts/start-local.sh",
     "dev": "npm --prefix apps/frontend run dev",
-    "dev:api": "npm --prefix apps/api-gateway start",
+    "dev:api": "DATABASE_URL=postgres://devpilot:devpilot@localhost:5432/devpilot npm --prefix apps/api-gateway start",
     "build": "npm --prefix apps/api-gateway run build && npm --prefix apps/frontend run build",
-    "seed": "npm --prefix apps/api-gateway run seed",
+    "build:api": "npm --prefix apps/api-gateway run build",
+    "build:frontend": "npm --prefix apps/frontend run build",
+    "seed": "DATABASE_URL=postgres://devpilot:devpilot@localhost:5432/devpilot npm --prefix apps/api-gateway run seed",
+    "postgres:up": "docker compose up -d postgres",
+    "postgres:seed": "DATABASE_URL=postgres://devpilot:devpilot@localhost:5432/devpilot npm --prefix apps/api-gateway run seed:public",
+    "dev:api:postgres": "DATABASE_URL=postgres://devpilot:devpilot@localhost:5432/devpilot npm --prefix apps/api-gateway start",
     "monitoring": "docker compose -f docker-compose.monitoring.yml up",
     "monitoring:grafana-cloud": "bash scripts/configure_grafana_cloud.sh",
+    "verify": "npm run build && docker compose config >/dev/null && docker compose -f docker-compose.monitoring.yml config >/dev/null",
     "test": "jest"
   },
   "dependencies": {
@@ -37,8 +44,10 @@
     "devops",
     "project management",
     "saas",
-    "ai"
+    "observability",
+    "prometheus",
+    "grafana"
   ],
-  "author": "Your Name",
+  "author": "DevPilot Project Team",
   "license": "MIT"
 }

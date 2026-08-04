@@ -75,7 +75,7 @@ export const kanbanData = [
     title: 'Backlog',
     cards: [
       { id: 'k1', title: 'Auth latency spike', owner: 'SRE' },
-      { id: 'k2', title: 'RCA: billing retry storm', owner: 'Billing' },
+      { id: 'k2', title: 'RCA: release retry storm', owner: 'Platform' },
     ],
   },
   {

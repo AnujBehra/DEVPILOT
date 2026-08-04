@@ -1,9 +1,12 @@
 import { FormEvent, useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useSearchParams } from 'react-router-dom';
+import { authApi } from '../api/auth';
 
 export type AuthUser = {
+  workspaceId?: string;
   name: string;
   email: string;
+  role: 'owner' | 'admin' | 'manager' | 'member' | 'viewer';
 };
 
 type LoginProps = {
@@ -11,62 +14,69 @@ type LoginProps = {
   onLogin: (user: AuthUser) => void;
 };
 
-type StoredUser = AuthUser & {
-  password: string;
-};
-
-const usersKey = 'devpilot.users';
-
-const readUsers = (): StoredUser[] => {
-  try {
-    const users = JSON.parse(localStorage.getItem(usersKey) || '[]');
-    return Array.isArray(users) ? users : [];
-  } catch {
-    return [];
-  }
-};
-
 export const Login = ({ authenticated, onLogin }: LoginProps) => {
+  const [searchParams] = useSearchParams();
+  const inviteToken = searchParams.get('invite') || '';
+  const invitedEmail = searchParams.get('email') || '';
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(invitedEmail);
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   if (authenticated) {
-    return <Navigate to="/" replace />;
+    return <Navigate to="/app" replace />;
   }
 
-  const submit = (event: FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
+    setSubmitting(true);
+    setError('');
     const normalizedEmail = email.trim().toLowerCase();
-    const users = readUsers();
 
-    if (mode === 'register') {
-      if (!name.trim() || !normalizedEmail || !password) {
-        setError('Enter a name, email, and password.');
+    try {
+      if (mode === 'register') {
+        if (!name.trim() || !normalizedEmail || !password) {
+          setError('Enter a name, email, and password.');
+          return;
+        }
+        const result = await authApi.register({ name: name.trim(), email: normalizedEmail, password });
+        localStorage.setItem('devpilot.authenticated', 'true');
+        localStorage.setItem('devpilot.user', JSON.stringify(result.user));
+        localStorage.setItem('devpilot.token', result.token);
+        if (inviteToken) await authApi.acceptInvite(inviteToken).catch(() => undefined);
+        onLogin(result.user);
         return;
       }
-      if (users.some((user) => user.email === normalizedEmail)) {
-        setError('An account already exists for this email.');
-        return;
-      }
-      const user = { name: name.trim(), email: normalizedEmail, password };
-      localStorage.setItem(usersKey, JSON.stringify([...users, user]));
+
+      const result = await authApi.login({ email: normalizedEmail, password });
       localStorage.setItem('devpilot.authenticated', 'true');
-      localStorage.setItem('devpilot.user', JSON.stringify({ name: user.name, email: user.email }));
-      onLogin({ name: user.name, email: user.email });
-      return;
+      localStorage.setItem('devpilot.user', JSON.stringify(result.user));
+      localStorage.setItem('devpilot.token', result.token);
+      if (inviteToken) await authApi.acceptInvite(inviteToken).catch(() => undefined);
+      onLogin(result.user);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Authentication failed.');
+    } finally {
+      setSubmitting(false);
     }
+  };
 
-    const user = users.find((candidate) => candidate.email === normalizedEmail && candidate.password === password);
-    if (!user) {
-      setError('No account found for those credentials. Register first or check your password.');
-      return;
+  const openDemoWorkspace = async () => {
+    setSubmitting(true);
+    setError('');
+    try {
+      const result = await authApi.login({ email: 'admin@devpilot.local', password: 'DevPilot@2026' });
+      localStorage.setItem('devpilot.authenticated', 'true');
+      localStorage.setItem('devpilot.user', JSON.stringify(result.user));
+      localStorage.setItem('devpilot.token', result.token);
+      onLogin(result.user);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Unable to open demo workspace.');
+    } finally {
+      setSubmitting(false);
     }
-    localStorage.setItem('devpilot.authenticated', 'true');
-    localStorage.setItem('devpilot.user', JSON.stringify({ name: user.name, email: user.email }));
-    onLogin({ name: user.name, email: user.email });
   };
 
   return (
@@ -74,14 +84,29 @@ export const Login = ({ authenticated, onLogin }: LoginProps) => {
       <div className="w-full max-w-5xl">
         <div className="card hero-panel">
           <div className="hero-copy">
-            <span className="badge">DevPilot AI</span>
+            <span className="badge">DevPilot</span>
             <div>
-              <h1>Project delivery, deployments, incidents, and monitoring in one calm workspace.</h1>
-              <p className="subtle">Sign in with a local account to keep your own projects isolated, connect deployed apps, and route monitoring into Grafana.</p>
+              <h1>Launch a calmer delivery workspace.</h1>
+              <p className="subtle">Plan projects, track releases, monitor health, and keep the team aligned.</p>
             </div>
             <div className="hero-meta">
-              <span className="status-badge status-healthy"><span className="status-badge-dot" /> Per-user project workspace</span>
-              <span className="subtle">Create an account or use one you already registered in this browser.</span>
+              <span className="status-badge status-healthy"><span className="status-badge-dot" /> Secure access</span>
+              <span className="badge">Team collaboration</span>
+              <span className="badge">Fast setup</span>
+            </div>
+            <div className="value-grid">
+              <div>
+                <strong>Releases</strong>
+                <span>Track provider, branch, SHA, actor, version, and status.</span>
+              </div>
+              <div>
+                <strong>Incidents</strong>
+                <span>Create incidents for failed deploys, rollbacks, and health failures.</span>
+              </div>
+              <div>
+                <strong>Monitoring</strong>
+                <span>Use Prometheus metrics and dashboard visuals.</span>
+              </div>
             </div>
           </div>
 
@@ -100,6 +125,7 @@ export const Login = ({ authenticated, onLogin }: LoginProps) => {
                 placeholder="Your name"
                 value={name}
                 onChange={(event) => setName(event.target.value)}
+                disabled={submitting}
               />
             </div>
           ) : null}
@@ -112,6 +138,7 @@ export const Login = ({ authenticated, onLogin }: LoginProps) => {
               placeholder="you@company.com"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
+              disabled={submitting}
               autoFocus
             />
           </div>
@@ -124,6 +151,7 @@ export const Login = ({ authenticated, onLogin }: LoginProps) => {
               placeholder="Password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
+              disabled={submitting}
             />
           </div>
 
@@ -136,9 +164,23 @@ export const Login = ({ authenticated, onLogin }: LoginProps) => {
           <button
             className="w-full px-4 py-2 bg-primary text-white rounded-lg font-medium hover:bg-primary/90 transition"
             type="submit"
+            disabled={submitting}
           >
-            {mode === 'login' ? 'Login' : 'Create Account'}
+            {submitting ? 'Please wait...' : mode === 'login' ? 'Login' : 'Create account'}
           </button>
+
+          <button
+            className="w-full px-4 py-2 border border-border rounded-lg font-medium hover:bg-background transition"
+            type="button"
+            disabled={submitting}
+            onClick={openDemoWorkspace}
+          >
+            Open sample workspace
+          </button>
+
+          <p className="text-xs text-muted text-center">
+            Sample login: admin@devpilot.local / DevPilot@2026
+          </p>
           </form>
         </div>
       </div>

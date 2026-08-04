@@ -1,0 +1,17 @@
+{
+  "name": "DevPilot",
+  "short_name": "DevPilot",
+  "description": "DevOps project management, deployment tracking, incidents, and observability.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/pwa-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

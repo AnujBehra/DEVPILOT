@@ -1,9 +1,0 @@
-[
-  {
-    "id": "df41c656-1290-452c-9d81-6c0f973227bf",
-    "timestamp": "2026-06-12T16:17:58.470Z",
-    "actor": "product",
-    "role": "viewer",
-    "action": "project.created:test"
-  }
-]

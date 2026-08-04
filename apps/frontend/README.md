@@ -1,6 +1,6 @@
-# DevPilot AI Frontend
+# DevPilot Frontend
 
-This is the portfolio-ready command center UI inspired by Linear, Jira, Vercel, Datadog, GitHub, and Grafana.
+This is the launch-ready DevPilot command center UI for project delivery, releases, incidents, health monitoring, and observability.
 
 ## Highlights
 - Beautiful dashboards with advanced charts.

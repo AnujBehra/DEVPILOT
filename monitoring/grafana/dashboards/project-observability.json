@@ -2,7 +2,7 @@
   "uid": "devpilot-project-observability",
   "title": "Project Observability",
   "schemaVersion": 40,
-  "version": 1,
+  "version": 4,
   "refresh": "10s",
   "timezone": "browser",
   "templating": {
@@ -11,10 +11,16 @@
         "name": "project_id",
         "type": "query",
         "datasource": "Prometheus",
-        "query": "label_values(project_health_status, project_id)",
+        "query": "label_values(project_info, project_id)",
         "refresh": 1,
         "includeAll": false,
-        "multi": false
+        "multi": false,
+        "label": "Project",
+        "current": {
+          "selected": true,
+          "text": "Select project",
+          "value": ""
+        }
       }
     ]
   },
@@ -22,16 +28,56 @@
     {
       "type": "stat",
       "title": "Current Health",
-      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 5 },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
       "targets": [
-        { "expr": "project_health_status{project_id=\"$project_id\"}", "refId": "A" }
+        {
+          "expr": "project_health_status{project_id=\"$project_id\"}",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "1": { "text": "Healthy", "color": "green" }, "0.5": { "text": "Warning", "color": "yellow" }, "0": { "text": "Down", "color": "red" } } }
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Down",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "Healthy",
+                  "color": "green"
+                },
+                "0.5": {
+                  "text": "Warning",
+                  "color": "yellow"
+                }
+              }
+            }
           ],
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 0.5 }, { "color": "green", "value": 1 } ] }
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
         },
         "overrides": []
       }
@@ -39,62 +85,310 @@
     {
       "type": "stat",
       "title": "Project Uptime",
-      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 5 },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
       "targets": [
-        { "expr": "project_uptime_percent{project_id=\"$project_id\"}", "refId": "A" }
+        {
+          "expr": "project_uptime_percent{project_id=\"$project_id\"}",
+          "refId": "A"
+        }
       ],
-      "fieldConfig": { "defaults": { "unit": "percent", "decimals": 1 }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1
+        },
+        "overrides": []
+      }
     },
     {
       "type": "stat",
       "title": "Latest Response Time",
-      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 5 },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
       "targets": [
-        { "expr": "project_response_time_ms{project_id=\"$project_id\"}", "refId": "A" }
+        {
+          "expr": "project_response_time_ms{project_id=\"$project_id\"}",
+          "refId": "A"
+        }
       ],
-      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "stat",
       "title": "Latest HTTP Status",
-      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 5 },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
       "targets": [
-        { "expr": "project_http_status_code{project_id=\"$project_id\"}", "refId": "A" }
+        {
+          "expr": "project_http_status_code{project_id=\"$project_id\"}",
+          "refId": "A"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "Response Time Trend",
-      "gridPos": { "x": 0, "y": 5, "w": 12, "h": 8 },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
-        { "expr": "project_response_time_ms{project_id=\"$project_id\"}", "legendFormat": "{{project_name}}", "refId": "A" }
+        {
+          "expr": "project_response_time_ms{project_id=\"$project_id\"}",
+          "legendFormat": "{{project_name}}",
+          "refId": "A"
+        }
       ],
-      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
       "title": "Health State",
-      "gridPos": { "x": 12, "y": 5, "w": 12, "h": 8 },
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
-        { "expr": "project_health_status{project_id=\"$project_id\"}", "legendFormat": "{{status}}", "refId": "A" }
+        {
+          "expr": "project_health_status{project_id=\"$project_id\"}",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "HTTP Status Code",
-      "gridPos": { "x": 0, "y": 13, "w": 12, "h": 8 },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
-        { "expr": "project_http_status_code{project_id=\"$project_id\"}", "legendFormat": "{{project_name}}", "refId": "A" }
+        {
+          "expr": "project_http_status_code{project_id=\"$project_id\"}",
+          "legendFormat": "{{project_name}}",
+          "refId": "A"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "Uptime Trend",
-      "gridPos": { "x": 12, "y": 13, "w": 12, "h": 8 },
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
-        { "expr": "project_uptime_percent{project_id=\"$project_id\"}", "legendFormat": "{{project_name}}", "refId": "A" }
+        {
+          "expr": "project_uptime_percent{project_id=\"$project_id\"}",
+          "legendFormat": "{{project_name}}",
+          "refId": "A"
+        }
       ],
-      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Project Delivery Metrics",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Open Issues",
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "project_open_tasks_total{project_id=\"$project_id\"}",
+          "legendFormat": "{{project_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Completed Issues",
+      "gridPos": {
+        "x": 4,
+        "y": 22,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "project_completed_tasks_total{project_id=\"$project_id\"}",
+          "legendFormat": "{{project_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Deployments",
+      "gridPos": {
+        "x": 8,
+        "y": 22,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "project_deployments_total{project_id=\"$project_id\"}",
+          "legendFormat": "{{project_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Open Incidents",
+      "gridPos": {
+        "x": 12,
+        "y": 22,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "project_open_incidents_total{project_id=\"$project_id\"}",
+          "legendFormat": "{{project_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Team Members",
+      "gridPos": {
+        "x": 16,
+        "y": 22,
+        "w": 4,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "project_members_total{project_id=\"$project_id\"}",
+          "legendFormat": "{{project_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Project Work Snapshot",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "project_tasks_total{project_id=\"$project_id\"}",
+          "legendFormat": "Total issues",
+          "refId": "A"
+        },
+        {
+          "expr": "project_open_tasks_total{project_id=\"$project_id\"}",
+          "legendFormat": "Open issues",
+          "refId": "B"
+        },
+        {
+          "expr": "project_deployments_total{project_id=\"$project_id\"}",
+          "legendFormat": "Deployments",
+          "refId": "C"
+        },
+        {
+          "expr": "project_open_incidents_total{project_id=\"$project_id\"}",
+          "legendFormat": "Open incidents",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      }
     }
   ]
 }

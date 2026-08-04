@@ -1,4 +1,16 @@
 node_modules
+.DS_Store
+**/.DS_Store
+dist
+apps/*/dist
+*.tsbuildinfo
+output/
+outputs/
+tmp/
 .vercel
+.env
+.env.local
+apps/*/.env
+apps/*/.env.local
 monitoring/prometheus/prometheus.grafana-cloud.generated.yml
 apps/api-gateway/.data/

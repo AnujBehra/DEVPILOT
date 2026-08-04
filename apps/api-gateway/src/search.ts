@@ -11,8 +11,10 @@ export const searchRecords = async (query: string) => {
 
   const store = await readStoreAsync();
   const dataset = [
+    ...store.projects.map((project) => `${project.name} - ${project.projectKey} - ${project.serviceName}`),
     ...store.tasks.map((task) => `${task.title} - ${task.status} - ${task.assignee}`),
     ...store.deployments.map((deployment) => `${deployment.service} ${deployment.version} - ${deployment.status}`),
+    ...store.incidents.map((incident) => `${incident.title} - ${incident.status} - ${incident.service}`),
     ...store.slos.map((slo) => `${slo.service} - ${slo.objective}`),
   ];
   const results = dataset.filter((item) => item.toLowerCase().includes(normalizedQuery));

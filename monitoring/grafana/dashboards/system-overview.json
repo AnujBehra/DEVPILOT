@@ -2,13 +2,179 @@
   "uid": "devpilot-system-overview",
   "title": "System Overview",
   "schemaVersion": 40,
-  "version": 1,
+  "version": 2,
   "refresh": "10s",
+  "timezone": "browser",
   "panels": [
-    { "type": "timeseries", "title": "Request Rate", "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 }, "targets": [{ "expr": "sum(rate(http_requests_total[1m]))", "legendFormat": "req/s" }] },
-    { "type": "timeseries", "title": "Average Latency", "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 }, "targets": [{ "expr": "sum(rate(http_request_duration_seconds_sum[1m])) / sum(rate(http_request_duration_seconds_count[1m]))", "legendFormat": "seconds" }] },
-    { "type": "timeseries", "title": "Error Rate", "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 }, "targets": [{ "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m])) / clamp_min(sum(rate(http_requests_total[1m])), 1)", "legendFormat": "errors" }] },
-    { "type": "stat", "title": "Active Projects", "gridPos": { "x": 0, "y": 8, "w": 12, "h": 6 }, "targets": [{ "expr": "active_projects_total", "legendFormat": "projects" }] },
-    { "type": "stat", "title": "Created Tasks", "gridPos": { "x": 12, "y": 8, "w": 12, "h": 6 }, "targets": [{ "expr": "tasks_created_total", "legendFormat": "tasks" }] }
+    {
+      "type": "timeseries",
+      "title": "Request Volume",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[5m]))",
+          "legendFormat": "req/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Error Rate",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(http_requests_total[5m])), 1)",
+          "legendFormat": "error ratio",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "P95 Response Time",
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory Usage",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "devpilot_process_resident_memory_bytes",
+          "legendFormat": "rss",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU Usage",
+      "gridPos": {
+        "x": 8,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "rate(devpilot_process_cpu_seconds_total[5m])",
+          "legendFormat": "cpu/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Event Loop Lag",
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "devpilot_nodejs_eventloop_lag_seconds",
+          "legendFormat": "lag",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Active Projects",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "active_projects_total",
+          "legendFormat": "projects",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Created Tasks",
+      "gridPos": {
+        "x": 6,
+        "y": 16,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "tasks_created_total",
+          "legendFormat": "tasks",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Deployments",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "deployments_created_total",
+          "legendFormat": "deployments",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Incidents",
+      "gridPos": {
+        "x": 18,
+        "y": 16,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "incidents_created_total",
+          "legendFormat": "incidents",
+          "refId": "A"
+        }
+      ]
+    }
   ]
 }

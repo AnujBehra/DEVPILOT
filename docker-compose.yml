@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: devpilot
+      POSTGRES_USER: devpilot
+      POSTGRES_PASSWORD: devpilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - devpilot-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devpilot -d devpilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   api-gateway:
     build:
       context: ./apps/api-gateway
@@ -6,10 +22,14 @@ services:
       - "3000:3000"
     environment:
       PORT: 3000
+      DATABASE_URL: postgres://devpilot:devpilot@postgres:5432/devpilot
       AUTH_HEALTH_URL: http://api-gateway:3000/auth/health
       PROJECT_HEALTH_URL: http://api-gateway:3000/project/health
       ANALYTICS_HEALTH_URL: http://api-gateway:3000/analytics/health
       NOTIFICATION_HEALTH_URL: http://api-gateway:3000/notification/health
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   frontend:
     build:
@@ -45,3 +65,6 @@ services:
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+
+volumes:
+  devpilot-postgres-data:
