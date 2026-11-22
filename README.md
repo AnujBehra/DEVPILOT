@@ -1,32 +1,32 @@
-# DevPilot AI — AI-Augmented DevOps SaaS Platform
+# DevPilot: DevOps Management & Observability Platform
 
-[![Live Demo](https://img.shields.io/badge/Live%20Demo-devpilot--tau.vercel.app-blue?style=for-the-badge&logo=vercel)](https://devpilot-tau.vercel.app)
-[![CI](https://img.shields.io/badge/CI-Passing-brightgreen?style=for-the-badge&logo=githubactions)](https://github.com/AnujBehra/DEVPILOT/actions)
-[![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?style=for-the-badge&logo=docker)](docker-compose.yml)
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-Helm%20%2B%20HPA-326CE5?style=for-the-badge&logo=kubernetes)](infra/k8s)
-[![Terraform](https://img.shields.io/badge/Terraform-IaC%20Modules-844FBA?style=for-the-badge&logo=terraform)](infra/terraform)
-[![Observability](https://img.shields.io/badge/Observability-Prometheus%20%2B%20Grafana-F46800?style=for-the-badge&logo=grafana)](monitoring)
+[![Live Demo](https://img.shields.io/badge/Demo-devpilot--tau.vercel.app-blue?logo=vercel)](https://devpilot-tau.vercel.app)
+[![CI](https://github.com/AnujBehra/DEVPILOT/actions/workflows/ci.yml/badge.svg)](https://github.com/AnujBehra/DEVPILOT/actions)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](tsconfig.json)
+[![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-Helm%20%2B%20HPA-326CE5?logo=kubernetes&logoColor=white)](infra/k8s)
+[![Terraform](https://img.shields.io/badge/Terraform-IaC-844FBA?logo=terraform&logoColor=white)](infra/terraform)
+[![Prometheus](https://img.shields.io/badge/Prometheus-Metrics-E6522C?logo=prometheus&logoColor=white)](monitoring)
 
-**DevPilot** is a project-centric DevOps and observability SaaS platform for modern engineering teams. It combines project management, interactive Kanban task boards, automated deployment tracking, incident response, URL health monitoring, Prometheus metrics, and pre-configured Grafana dashboards with real-time WebSocket notifications.
+DevPilot is an operations and observability platform designed for engineering teams to track deployments, manage task workflows, monitor service health, and view operational metrics in one central interface.
 
-- 🌐 **Live Application:** [https://devpilot-tau.vercel.app](https://devpilot-tau.vercel.app)
-- 📦 **GitHub Repository:** [https://github.com/AnujBehra/DEVPILOT](https://github.com/AnujBehra/DEVPILOT)
+**Live Application:** [https://devpilot-tau.vercel.app](https://devpilot-tau.vercel.app)
 
 ---
 
-## 🚀 Key Highlights & Architecture
+## Overview
 
-- **API Gateway & Microservices:** Node.js/Express API Gateway with secure JWT authentication, role-based access control (RBAC), rate limiting, and asynchronous background worker queues processing real-time telemetry.
-- **Microservices Architecture:** 5+ containerized microservices (`auth-service`, `project-service`, `analytics-service`, `notification-service`, `ai-rag-service`, `service-discovery`) with multi-stage Docker builds.
-- **Kubernetes & Helm:** Production-grade Kubernetes manifests and custom Helm charts (`infra/helm/devpilot-ai`) with Horizontal Pod Autoscalers (HPA) and rolling updates.
-- **Infrastructure as Code (IaC):** Automated cloud provisioning via modular Terraform configurations (`infra/terraform/modules`) specifying isolated VPC networking, AWS RDS / PostgreSQL instances, and secure ingress controllers.
-- **Full-Stack Observability:** Instrumented with Prometheus custom metrics (`prom-client`), Grafana dashboards tracking SLOs, p95 latencies, and error budgets, plus Grafana Cloud remote-write integration.
+- **API Gateway & Routing:** Express.js API Gateway providing JWT authentication, RBAC, rate limiting, and webhook ingestion for release tracking.
+- **Microservices Stack:** Modular background services (`auth-service`, `project-service`, `analytics-service`, `notification-service`, `ai-rag-service`, `service-discovery`) containerized with multi-stage Docker builds.
+- **Kubernetes & Helm:** Kubernetes manifests with Horizontal Pod Autoscalers (HPA) and custom Helm charts under `infra/helm/devpilot-ai`.
+- **Infrastructure as Code (IaC):** Modular Terraform configurations (`infra/terraform/modules`) defining isolated VPC networking, AWS RDS / PostgreSQL instances, and secure ingress controllers.
+- **Observability:** Custom metrics collected via `prom-client`, pre-configured Grafana dashboards for SLO and latency tracking, and optional Grafana Cloud remote-write publishing.
 
 ```text
 Login -> Overview -> Projects -> Project Detail -> Issues / Board / Releases / Incidents / Analytics / Monitoring
 ```
 
-## Architecture Diagram
+## Architecture
 
 ```mermaid
 flowchart LR
