@@ -38,7 +38,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/devpilot-ai.git"
+    "url": "https://github.com/AnujBehra/DEVPILOT.git"
   },
   "keywords": [
     "devops",
@@ -48,6 +48,6 @@
     "prometheus",
     "grafana"
   ],
-  "author": "DevPilot Project Team",
+  "author": "Anuj Behra",
   "license": "MIT"
 }
